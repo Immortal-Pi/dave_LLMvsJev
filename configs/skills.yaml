@@ -1,0 +1,114 @@
+# Skill catalogs per adapter. Durations for 'dave' come from scripts/calibrate_skills.py
+# (see docs/skills.md); do not change them without re-running calibration.
+#
+# A phase holds its buttons for 'ticks' frames, or until predicate 'until' holds (at most
+# 'max_ticks'). Buttons are released between phases and after the last one. A skill's hard
+# cap is the sum of its phase budgets.
+skills:
+  executor:
+    hazard_radius_px: 48   # new_hazard_nearby: 3 tiles, centre-to-centre on either axis
+
+  catalogs:
+    # Synthetic test platformer (not Dangerous Dave); unchanged since Phase 1.
+    fixture:
+      - {name: move_left,  kind: single, phases: [{buttons: [left],        ticks: 1}]}
+      - {name: move_right, kind: single, phases: [{buttons: [right],       ticks: 1}]}
+      - {name: jump,       kind: single, phases: [{buttons: [jump],        ticks: 3}]}
+      - {name: jump_left,  kind: single, phases: [{buttons: [jump, left],  ticks: 3}]}
+      - {name: jump_right, kind: single, phases: [{buttons: [jump, right], ticks: 3}]}
+      - {name: wait,       kind: single, phases: [{buttons: [],            ticks: 1}]}
+
+    dave:
+      # Walking moves 2 px every 3 ticks: 24 ticks = 1 tile (16 px).
+      - name: move_left_1
+        kind: single
+        description: walk left about 1 tile
+        preconditions: [alive]
+        phases: [{buttons: [left], ticks: 24}]
+        interrupt_on: [death, terminal, hazard_contact, new_hazard_nearby]
+      - name: move_right_1
+        kind: single
+        description: walk right about 1 tile
+        preconditions: [alive]
+        phases: [{buttons: [right], ticks: 24}]
+        interrupt_on: [death, terminal, hazard_contact, new_hazard_nearby]
+      - name: move_left_3
+        kind: single
+        description: walk left about 3 tiles
+        preconditions: [alive]
+        phases: [{buttons: [left], ticks: 72}]
+        interrupt_on: [death, terminal, hazard_contact, new_hazard_nearby]
+      - name: move_right_3
+        kind: single
+        description: walk right about 3 tiles
+        preconditions: [alive]
+        phases: [{buttons: [right], ticks: 72}]
+        interrupt_on: [death, terminal, hazard_contact, new_hazard_nearby]
+
+      # A jump starts when Up is pressed on the ground and the hidden landing cooldown
+      # (5 ticks) has expired. Up is released as soon as the jump starts, because holding
+      # it re-jumps on landing. A flat jump rises 32 px (2 tiles) and lands after 94 ticks;
+      # air control moves 1 px/tick.
+      - name: jump_up
+        kind: macro
+        description: jump straight up and land
+        preconditions: [on_ground]
+        phases:
+          - {buttons: [jump], until: jumping, max_ticks: 6}
+          - {buttons: [], until: landed, max_ticks: 200}
+        interrupt_on: [death, terminal, hazard_contact, new_hazard_nearby]
+      - name: jump_left
+        kind: macro
+        description: long jump left (about 6 tiles on flat ground) and land
+        preconditions: [on_ground]
+        phases:
+          - {buttons: [jump, left], until: jumping, max_ticks: 6}
+          - {buttons: [left], until: landed, max_ticks: 200}
+        interrupt_on: [death, terminal, hazard_contact, new_hazard_nearby]
+      - name: jump_right
+        kind: macro
+        description: long jump right (about 6 tiles on flat ground) and land
+        preconditions: [on_ground]
+        phases:
+          - {buttons: [jump, right], until: jumping, max_ticks: 6}
+          - {buttons: [right], until: landed, max_ticks: 200}
+        interrupt_on: [death, terminal, hazard_contact, new_hazard_nearby]
+      - name: jump_left_short
+        kind: macro
+        description: jump left about 2 tiles, then drop straight down
+        preconditions: [on_ground]
+        phases:
+          - {buttons: [jump, left], until: jumping, max_ticks: 6}
+          - {buttons: [left], ticks: 32}
+          - {buttons: [], until: landed, max_ticks: 200}
+        interrupt_on: [death, terminal, hazard_contact, new_hazard_nearby]
+      - name: jump_right_short
+        kind: macro
+        description: jump right about 2 tiles, then drop straight down
+        preconditions: [on_ground]
+        phases:
+          - {buttons: [jump, right], until: jumping, max_ticks: 6}
+          - {buttons: [right], ticks: 32}
+          - {buttons: [], until: landed, max_ticks: 200}
+        interrupt_on: [death, terminal, hazard_contact, new_hazard_nearby]
+
+      # One bullet at a time; it spawns 8 px ahead in the facing direction and moves 2 px/tick.
+      - name: shoot
+        kind: single
+        description: fire the gun in the facing direction
+        preconditions: [alive, has_gun, facing_side, no_bullet]
+        phases: [{buttons: [fire], ticks: 1}]
+        interrupt_on: [death, terminal]
+
+      # wait_long has no precondition so a legal candidate always exists (e.g. while burning).
+      - name: wait_short
+        kind: single
+        description: release all keys for 6 ticks (covers the landing cooldown)
+        preconditions: [alive]
+        phases: [{buttons: [], ticks: 6}]
+        interrupt_on: [death, terminal, hazard_contact, new_hazard_nearby]
+      - name: wait_long
+        kind: single
+        description: release all keys for 24 ticks
+        phases: [{buttons: [], ticks: 24}]
+        interrupt_on: [death, terminal, new_hazard_nearby]

@@ -1,0 +1,7 @@
+environment:
+  adapter: fixture             # 'dave' only after Phase 2 verification
+  levels_dir: tests/fixtures/levels
+  observation_policy: local_observed
+  execution_mode: paused_step
+  decision_frames: 8           # calibrate against the real game's 14 ms tick
+  dave_dir: external/deadly-dave   # patched clone with deadly-dave-bridge.exe (scripts/setup_dave.bat)

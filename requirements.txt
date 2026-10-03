@@ -1,3 +1,1 @@
-openrouter
-python-dotenv 
-requests
+# Dependencies are managed in pyproject.toml / uv.lock. See docs/development.md.

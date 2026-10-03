@@ -1,7 +1,36 @@
 [project]
 name = "system-one-model"
 version = "0.1.0"
-description = "Add your description here"
+description = "Research harness comparing LLM and Jev tactical controllers on Dangerous Dave."
 readme = "README.md"
 requires-python = ">=3.13"
-dependencies = []
+dependencies = [
+    "httpx>=0.28",
+    "pydantic>=2.9",
+    "python-dotenv>=1.0",
+    "pyyaml>=6.0",
+]
+
+[project.scripts]
+dave-agent = "dave_agent.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8.3"]
+notebook = ["ipykernel>=6.29", "openrouter", "requests>=2.32"]
+
+[tool.uv]
+default-groups = ["dev", "notebook"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/dave_agent"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "live: calls a paid external API; skipped unless RUN_LIVE=1",
+    "dave: drives the real deadly-dave bridge; skipped when it is not built",
+]

@@ -1,0 +1,83 @@
+{
+  "_meta": {
+    "endpoint": "https://openrouter.ai/api/alpha/decisions",
+    "captured_at": "2026-10-03T18:31:22+00:00",
+    "http_status": 200,
+    "latency_ms": 545.3,
+    "response_headers": {
+      "date": "Sat, 03 Oct 2026 18:31:20 GMT",
+      "content-type": "application/json",
+      "transfer-encoding": "chunked",
+      "connection": "keep-alive",
+      "access-control-allow-origin": "*",
+      "access-control-expose-headers": "X-Generation-Id,X-Provider-Name,request-id,cf-ray",
+      "x-generation-id": "gen-dec-1791052280-OJkB0gjyQkdg0Yaxzyxq",
+      "x-provider-name": "TypeSafe",
+      "permissions-policy": "payment=(self \"https://checkout.stripe.com\" \"https://connect-js.stripe.com\" \"https://js.stripe.com\" \"https://*.js.stripe.com\" \"https://hooks.stripe.com\")",
+      "referrer-policy": "no-referrer, strict-origin-when-cross-origin",
+      "x-content-type-options": "nosniff",
+      "content-encoding": "gzip",
+      "server": "cloudflare",
+      "cf-ray": "a44e05f0f9f98b88-EWR"
+    },
+    "note": "Sanitized live response from scripts/probe_jev.py; no credentials included."
+  },
+  "request": {
+    "model": "typesafe/jev-1.13",
+    "state": {
+      "player": {
+        "tile": [
+          3,
+          9
+        ],
+        "grounded": true,
+        "has_trophy": false
+      },
+      "goal": "collect the trophy at tile [7, 9]",
+      "nearby": [
+        {
+          "type": "fire",
+          "tile": [
+            5,
+            10
+          ]
+        }
+      ]
+    },
+    "questions": {
+      "action": {
+        "type": "choice",
+        "instructions": "Which candidate skill best advances the goal right now without touching fire?",
+        "criteria": {
+          "c0_move_right": "Walk right one step along the floor",
+          "c1_jump_right": "Jump up and to the right",
+          "c2_move_left": "Walk left one step",
+          "c3_wait": "Stay in place"
+        }
+      }
+    }
+  },
+  "response": {
+    "model": "typesafe/jev-1.13-20260917",
+    "answers": {
+      "action": {
+        "type": "choice",
+        "choice": "c0_move_right",
+        "probabilities": {
+          "c3_wait": 0,
+          "c0_move_right": 0.94,
+          "c1_jump_right": 0.06,
+          "c2_move_left": 0
+        },
+        "confidence": 0.92
+      }
+    },
+    "usage": {
+      "input_tokens": 442,
+      "output_tokens": 59,
+      "cost": 1.8564e-05
+    },
+    "id": "gen-dec-1791052280-OJkB0gjyQkdg0Yaxzyxq",
+    "provider": "TypeSafe"
+  }
+}

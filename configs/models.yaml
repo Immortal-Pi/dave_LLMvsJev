@@ -1,0 +1,15 @@
+# Env var NAMES only; values come from .env (see .env.example).
+models:
+  planner:
+    provider: azure_openai
+    deployment_env: AZURE_OPENAI_CHAT_DEPLOYMENT
+  tactical_llm:
+    provider: azure_openai
+    deployment_env: AZURE_OPENAI_CHAT_DEPLOYMENT
+  jev:
+    provider: openrouter_decisions
+    endpoint: https://openrouter.ai/api/alpha/decisions
+    model_id: typesafe/jev-1.13   # verified 2026-10-03 via scripts/probe_jev.py
+    api_key_env: OPENROUTER_API_KEY
+  timeout_seconds: 20
+  max_retries: 1

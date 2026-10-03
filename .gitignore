@@ -9,3 +9,8 @@ wheels/
 # Virtual environments
 .venv
 .env
+
+# Generated run data and external sources (deadly-dave clone, builds)
+artifacts/
+external/
+.pytest_cache/

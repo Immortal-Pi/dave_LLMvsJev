@@ -1,0 +1,2 @@
+# Keep the deadly-dave patch byte-exact (LF) so git apply works on any checkout.
+*.patch -text

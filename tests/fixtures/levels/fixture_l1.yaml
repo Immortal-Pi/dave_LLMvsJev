@@ -1,0 +1,12 @@
+# Synthetic fixture level (not Dangerous Dave). Legend:
+# '#' wall, '.' empty, 'D' start, 'F' fire, '*' gem, 'T' trophy, 'X' door (needs trophy).
+level_id: fixture_l1
+lives: 3
+view_half_width: 4
+rows:
+  - "############"
+  - "#..........#"
+  - "#.*....T...#"
+  - "#.....##...#"
+  - "#D..F....X.#"
+  - "############"

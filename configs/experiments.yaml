@@ -1,0 +1,23 @@
+schema_version: 1
+scenario: fixture_l1          # dave scenarios: level1 .. level9
+memory:
+  recent_history_frames: 120
+  episode_store: artifacts/events.sqlite
+  graph_enabled: false
+  graph_checkpoint: null
+  graph_updates: true
+planning:
+  no_progress_frames: 180
+  repeated_skill_failures: 3
+  max_calls_per_episode: 30
+benchmark:
+  pilot_trials: 5
+  initial_trials: 30
+  max_episode_frames: 600      # fixture scale; Dave value calibrated in Phase 9
+  max_episode_wall_seconds: 900
+  paid_run_budget_usd: 5
+  randomize_arm_order: true
+arms:
+  A: {planner: llm, tactical: llm, graph_enabled: false}
+  B: {planner: llm, tactical: jev, graph_enabled: false}
+  C: {planner: llm, tactical: jev, graph_enabled: true}
