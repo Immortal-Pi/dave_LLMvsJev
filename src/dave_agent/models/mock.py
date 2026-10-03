@@ -1,4 +1,5 @@
-"""Offline mock controller: seeded uniform choice over the offered candidates (ignores memory)."""
+"""Offline mock controller: seeded uniform choice over the offered candidates (ignores memory).
+The CLI wraps the equivalent ``models.tactical.SeededMockModel`` in the shared ``ModelController``."""
 
 import random
 
@@ -18,7 +19,7 @@ class SeededMockController:
         goal: Goal | None,
         candidates: list[SkillCandidate],
         memory: MemoryContext,
-    ) -> tuple[Decision, ModelCallRecord]:
+    ) -> tuple[Decision, tuple[ModelCallRecord, ...]]:
         if not candidates:
             raise ValueError("no candidates offered")
         chosen = self._rng.choice(candidates)
@@ -30,4 +31,4 @@ class SeededMockController:
         record = ModelCallRecord(
             provider=self.provider, model=self.model, purpose="tactical", latency_ms=0.0, status="ok"
         )
-        return decision, record
+        return decision, (record,)

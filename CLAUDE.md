@@ -19,6 +19,7 @@ Detailed documentation lives in `docs/`. Read the relevant file before working i
 - [docs/memory.md](docs/memory.md): working memory (bounded history, progress and stuck counters, controller context), derived events, the SQLite episode store, JSONL export and replay.
 - [docs/graph.md](docs/graph.md): the learned world graph (platform segmentation, evidence-based edges, Dijkstra routes, atomic versioned checkpoints).
 - [docs/planner.md](docs/planner.md): the strategic planner and goal manager (candidate goals, goal lifecycle, shared triggers, fallback, the Azure planner, graph route waypoints).
+- [docs/tactical.md](docs/tactical.md): tactical controllers (the shared request, output validation, retry, deterministic fallback, per-episode budgets, context digests, the Azure and Jev tactical models).
 - [docs/state_mapping.md](docs/state_mapping.md): deadly-dave C fields mapped to `Observation` fields.
 - [docs/jev-apis.md](docs/jev-apis.md): the OpenRouter chat SDK and the decisions endpoint, including models, payload shape, question types, and config.
 - [docs/development.md](docs/development.md): uv with the `jev/` venv (`UV_PROJECT_ENVIRONMENT=jev`), commands, single-test runs and config layout.

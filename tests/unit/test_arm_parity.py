@@ -144,3 +144,22 @@ def test_graph_learning_alone_adds_no_controller_context(config):
     finally:
         adapter.close()
     assert graph.g.number_of_nodes() > 0 and plain.seen == learning.seen
+
+
+def test_context_digests_logged_and_identical_across_arms_a_b_c(config, tmp_path):
+    """Every arm's tactical model goes through ModelController, which logs a digest of the shared
+    request per decision: equal digests show A, B and C were shown identical context."""
+    from dave_agent.models.tactical import ModelController, SeededMockModel
+
+    digests = {}
+    for arm, label in (("A", "mock-llm"), ("B", "mock-jev"), ("C", "mock-jev")):
+        with EpisodeStore(tmp_path / f"{arm}.sqlite") as store:
+            store.create_run(f"run-{arm}", mode="mock", command="test", config_json="{}")
+            recorder = store.recorder(f"run-{arm}", arm, label, "fixture_l1", 3, 50)
+            controller = ModelController(SeededMockModel(seed=3, label=label), config.tactical,
+                                         config.models.max_retries)
+            _run(controller, config, 3, recorder)
+            rows = store.query("SELECT forced, context_digest FROM decisions ORDER BY seq")
+        assert rows and all((r["context_digest"] is None) == bool(r["forced"]) for r in rows)
+        digests[arm] = [r["context_digest"] for r in rows]
+    assert digests["A"] == digests["B"] == digests["C"]

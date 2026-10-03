@@ -1,9 +1,11 @@
 """dave-agent command line.
 
-Modes: --mock runs offline mock tactical controllers (no network, no cost). The strategic
-planner is the offline rule planner unless --planner live is given, which calls Azure OpenAI
-(paid; the run is labeled live-planner). Live tactical controllers arrive in Phases 7-8.
-'probe-provider --provider azure' makes one small paid planner call to check the contract.
+Modes: by default 'play' is fully offline: a seeded mock tactical model and
+the rule planner (no network, no cost). --planner live calls the Azure OpenAI planner and
+--tactical live the arm's live tactical model (Azure OpenAI for tactical: llm, Jev via
+OpenRouter for tactical: jev). Live runs are paid, check credentials and print their budget
+before any call, and are labeled live-planner, live-tactical or live. 'probe-provider' makes
+one small paid call (Azure planner or tactical, Jev tactical) to check the contract.
 The 'fixture' adapter is a synthetic test platformer,
 never Dangerous Dave; the 'dave' adapter drives deadly-dave through the stepping bridge.
 Every 'play' episode is logged to the SQLite episode store; 'export' writes it as JSONL
@@ -26,19 +28,22 @@ from dave_agent.adapters import create_adapter
 from dave_agent.adapters.base import AdapterError
 from dave_agent.config import AppConfig, ConfigError, load_config
 from dave_agent.control.goals import GoalManager, TargetMemory, goal_candidates
+from dave_agent.control.skills import generate_candidates
 from dave_agent.logging_setup import configure_logging
 from dave_agent.memory.episodes import EpisodeStore, StoreError
 from dave_agent.memory.graph import WorldGraph
 from dave_agent.memory.persistence import GraphCheckpointError, export_yaml, load_checkpoint, save_checkpoint
 from dave_agent.memory.routes import find_route
 from dave_agent.memory.working import WorkingMemory
-from dave_agent.models.azure import AzureChatClient, AzurePlanner, AzureSettings
-from dave_agent.models.mock import SeededMockController
+from dave_agent.models.azure import AzureChatClient, AzurePlanner, AzureSettings, AzureTacticalModel
 from dave_agent.models.planner import PlanningRequest, RuleMockPlanner, parse_plan
+from dave_agent.models.jev import JevClient, JevSettings, JevTacticalModel
+from dave_agent.models.tactical import ModelController, SeededMockModel, tactical_request
 from dave_agent.runner.episode import run_episode
 from dave_agent.runner.replay import load_jsonl, replay_episode
 
 DEFAULT_CONFIG = Path("configs/experiments.yaml")
+JEV_TACTICAL_FIXTURE = Path("tests/fixtures/jev/tactical_response.json")
 
 
 def _cmd_probe(args: argparse.Namespace) -> int:
@@ -69,20 +74,38 @@ def _cmd_play(args: argparse.Namespace) -> int:
     config = load_config(args.config)
     if args.arm not in config.arms:
         raise ConfigError(f"unknown arm {args.arm!r}; configured arms: {sorted(config.arms)}")
-    if not args.mock:
-        raise ConfigError(
-            "live controllers are not implemented yet (LLM: Phase 7, Jev: Phase 8); rerun with --mock"
-        )
     arm = config.arms[args.arm]
-    live_planner = args.planner == "live"
+    live_planner, live_tactical = args.planner == "live", args.tactical == "live"
+    if args.mock and live_tactical:
+        raise ConfigError("--mock selects the mock tactical controller; drop it to use --tactical live")
     if live_planner and arm.planner != "llm":
         raise ConfigError(f"arm {args.arm} uses planner {arm.planner!r}; --planner live needs an LLM planner arm")
+    if live_tactical and arm.tactical not in LIVE_TACTICAL:
+        raise ConfigError(f"arm {args.arm} uses tactical {arm.tactical!r}; --tactical live supports "
+                          f"tactical: {' or '.join(sorted(LIVE_TACTICAL))}")
     # Validate credentials before starting the game or spending anything.
     planner = _azure_planner(config) if live_planner else RuleMockPlanner()
+    # Every arm's tactical model goes through the same retry, fallback and budget policy. Offline,
+    # all arms use the same seeded mock so runs are directly comparable.
+    model = (LIVE_TACTICAL[arm.tactical](config) if live_tactical
+             else SeededMockModel(seed=args.seed, label=f"mock-{arm.tactical}"))
+    controller = ModelController(model, config.tactical, config.models.max_retries)
+    mode = {(False, False): "mock", (True, False): "live-planner", (False, True): "live-tactical",
+            (True, True): "live"}[(live_planner, live_tactical)]
+    settings = {"planner": _settings(planner), "tactical": _settings(model),
+                "tactical_policy": config.tactical.model_dump(mode="json"), "max_retries": config.models.max_retries,
+                "max_episode_frames": config.benchmark.max_episode_frames,
+                "max_episode_wall_seconds": config.benchmark.max_episode_wall_seconds}
+    if mode != "mock":
+        print(json.dumps({"paid_run": mode, "budget": {
+            "tactical": {k: settings["tactical_policy"][k] for k in
+                         ("max_calls_per_episode", "max_tokens_per_episode", "max_cost_usd_per_episode",
+                          "on_budget_exhausted")},
+            "planner_max_calls_per_episode": config.planning.max_calls_per_episode,
+            "max_episode_frames": config.benchmark.max_episode_frames,
+            "max_episode_wall_seconds": config.benchmark.max_episode_wall_seconds}}), file=sys.stderr)
     adapter_name = args.adapter or config.environment.adapter
     adapter = create_adapter(adapter_name, config.environment, args.watch, args.watch_delay)
-    # Both arms use the same seeded mock so offline runs are directly comparable.
-    controller = SeededMockController(seed=args.seed, label=f"mock-{arm.tactical}")
     scenario = args.scenario or config.scenario
     run_id = args.run_id or f"run-{datetime.now(UTC):%Y%m%dT%H%M%S}-{uuid.uuid4().hex[:6]}"
     store = EpisodeStore(args.store or config.memory.episode_store)
@@ -96,12 +119,13 @@ def _cmd_play(args: argparse.Namespace) -> int:
         graph = (load_checkpoint(graph_path, caps.adapter, caps.build_id, policy) if graph_path.exists()
                  else WorldGraph(caps.adapter, caps.build_id, policy, config.graph.evidence_per_item))
     learn = graph is not None and config.memory.graph_updates
-    mode = "live-planner" if live_planner else "mock"
     # Same planner code and trigger settings for every arm; only graph arms get learned routes.
     goals = GoalManager(planner, config.planning, config.models.max_retries,
-                        graph if arm.graph_enabled else None, config.graph if arm.graph_enabled else None)
+                        graph if arm.graph_enabled else None, config.graph if arm.graph_enabled else None,
+                        reach=config.skills.reach.get(adapter_name))
     try:
-        store.create_run(run_id, mode=mode, command="play", config_json=config.model_dump_json())
+        store.create_run(run_id, mode=mode, command="play",
+                         config_json=json.dumps({**config.model_dump(mode="json"), "effective_settings": settings}))
         recorder = store.recorder(run_id, args.arm, controller.model, scenario, args.seed,
                                   config.memory.store_batch_size)
         result = run_episode(
@@ -116,16 +140,20 @@ def _cmd_play(args: argparse.Namespace) -> int:
             recorder=recorder,
             graph=graph if learn else None,
             goals=goals,
+            max_wall_seconds=config.benchmark.max_episode_wall_seconds,
         )
     finally:
         adapter.close()
         store.close()
-        if live_planner:
-            planner.client.close()  # type: ignore[attr-defined]
+        for live in (planner, model):
+            if hasattr(live, "client"):
+                live.client.close()
     if learn:
         graph.add_lineage(run_id, recorder.episode_key, args.arm, scenario)
         save_checkpoint(graph, graph_path)
     planner_calls = [c for c in result.model_calls if c.purpose == "planner"]
+    tactical_calls = [c for c in result.model_calls if c.purpose == "tactical"]
+    chosen = [d for d in result.decisions if not d.forced]
     ended = Counter(e.payload.get("status") for e in result.events if e.event_type in ("goal_achieved", "goal_failed"))
     summary = {
         "mode": mode,
@@ -141,13 +169,25 @@ def _cmd_play(args: argparse.Namespace) -> int:
         "frames": result.frames,
         "decisions": len(result.decisions),
         "forced_decisions": sum(d.forced for d in result.decisions),
-        "model_calls": len(result.model_calls) - len(planner_calls),
+        # A fallback is never a model decision.
+        "model_decisions": sum(not d.fallback for d in chosen),
+        "fallback_decisions": sum(d.fallback for d in chosen),
+        "fallback_reasons": dict(sorted(Counter(d.fallback_reason for d in chosen if d.fallback).items())),
+        "tactical_calls": len(tactical_calls),
+        "tactical_failures": dict(sorted(Counter(c.status for c in tactical_calls if c.status != "ok").items())),
+        "tactical_latency_ms": _latency(tactical_calls),
         "planner": f"{planner.provider}:{planner.model}",
         "planner_calls": len(planner_calls),
         "planner_failures": sum(c.status != "ok" for c in planner_calls),
+        "tokens": {"tactical": _tokens(tactical_calls), "planner": _tokens(planner_calls)},
+        "cost_usd": None if all(c.cost_usd is None for c in result.model_calls)
+        else round(sum(c.cost_usd or 0.0 for c in result.model_calls), 6),
         "goals": {"set": len(result.planning), "achieved": ended["achieved"], "failed": ended["failed"],
                   "expired": ended["expired"]},
         "planning_triggers": dict(sorted(Counter(t for r in result.planning for t in r.triggers).items())),
+        # Planning is event-driven (no timer): tactical decisions per planning episode.
+        "decisions_per_planning": round(len(result.decisions) / len(result.planning), 2) if result.planning
+        else None,
         "fallback_goals": sum(r.fallback for r in result.planning),
         "goal_trace": [r.chosen for r in result.planning],
         "route_ms": round(sum(r.route_ms for r in result.planning), 3),
@@ -164,20 +204,65 @@ def _cmd_play(args: argparse.Namespace) -> int:
         "deaths": sum(e.event_type == "death" for e in result.events),
         "last_observation_id": result.observation_ids[-1],
         "graph": None if graph is None else {"checkpoint": str(graph_path), "updated": learn, **graph.counts()},
+        "settings": {"planner": settings["planner"], "tactical": settings["tactical"]},
     }
     print(json.dumps(summary, indent=2))
     return 0
 
 
 def _azure_planner(config: AppConfig) -> AzurePlanner:
-    settings = AzureSettings.from_env(config.models.planner.deployment_env)
-    client = AzureChatClient(settings, config.models.timeout_seconds, config.models.max_retries)
-    return AzurePlanner(client)
+    cfg = config.models.planner
+    client = AzureChatClient(AzureSettings.from_env(cfg.deployment_env), config.models.timeout_seconds,
+                             config.models.max_retries)
+    return AzurePlanner(client, cfg.max_completion_tokens, cfg.reasoning_effort)
+
+
+def _azure_tactical(config: AppConfig) -> AzureTacticalModel:
+    cfg = config.models.tactical_llm
+    client = AzureChatClient(AzureSettings.from_env(cfg.deployment_env), config.models.timeout_seconds,
+                             config.models.max_retries)
+    return AzureTacticalModel(client, cfg.max_completion_tokens, cfg.reasoning_effort)
+
+
+def _jev_tactical(config: AppConfig) -> JevTacticalModel:
+    client = JevClient(JevSettings.from_env(config.models.jev), config.models.timeout_seconds,
+                       config.models.max_retries)
+    return JevTacticalModel(client)
+
+
+# Live tactical model per arm ``tactical`` value; each builder checks credentials first.
+LIVE_TACTICAL = {"llm": _azure_tactical, "jev": _jev_tactical}
+
+
+def _settings(model) -> dict:
+    """Effective settings of a planner or tactical model, without credentials."""
+    return model.settings() if hasattr(model, "settings") else {"provider": model.provider, "model": model.model}
+
+
+def _tokens(calls) -> dict[str, float]:
+    total: Counter = Counter()
+    for c in calls:
+        total.update(c.usage or {})
+    return dict(sorted(total.items()))
+
+
+def _latency(calls) -> dict | None:
+    values = sorted(c.latency_ms for c in calls if c.latency_ms is not None)
+    if not values:
+        return None
+    return {"mean": round(sum(values) / len(values), 1), "p50": values[len(values) // 2], "max": values[-1]}
 
 
 def _cmd_probe_provider(args: argparse.Namespace) -> int:
-    """One small paid planner call on the fixture start observation: checks the live contract."""
+    """One small paid call on the fixture start observation: checks the live contract."""
     config = load_config(args.config)
+    purpose = args.purpose or ("tactical" if args.provider == "jev" else "planner")
+    if args.provider == "jev" and purpose != "tactical":
+        raise ConfigError("Jev is a tactical model; use --purpose tactical")
+    if args.save_fixture and args.provider != "jev":
+        raise ConfigError("--save-fixture is only for --provider jev")
+    if purpose == "tactical":
+        return _probe_tactical(config, args.provider, args.save_fixture)
     planner = _azure_planner(config)
     adapter = create_adapter("fixture", config.environment)
     try:
@@ -205,6 +290,45 @@ def _cmd_probe_provider(args: argparse.Namespace) -> int:
         report["valid"] = True
     except ValueError as exc:
         report.update(valid=False, error=str(exc), raw=None if text is None else text[:300])
+    print(json.dumps(report, indent=2))
+    return 0 if report["valid"] else 1
+
+
+def _probe_tactical(config: AppConfig, provider: str, save_fixture: bool) -> int:
+    model = _jev_tactical(config) if provider == "jev" else _azure_tactical(config)
+    adapter = create_adapter("fixture", config.environment)
+    try:
+        obs = adapter.reset("fixture_l1", 0)
+        candidates = list(generate_candidates(config.skills.for_adapter("fixture"),
+                                              adapter.capabilities().buttons, obs).candidates)
+    finally:
+        adapter.close()
+    memory = WorkingMemory.from_config(config)
+    memory.reset(obs)
+    request = tactical_request(obs, None, candidates, memory.context())
+    try:
+        text, call = model.propose(request)
+    finally:
+        model.client.close()
+    report: dict = {"provider": call.provider, "model": call.model, "purpose": call.purpose, "status": call.status,
+                    "latency_ms": call.latency_ms, "retries": call.retries, "usage": call.usage,
+                    "cost_usd": call.cost_usd, "response_ref": call.response_ref, "output": call.output,
+                    "candidates": list(request.candidate_ids)}
+    try:
+        choice = model.parse(text, request.candidate_ids)
+        report.update(choice=choice.candidate_id, provider_score=choice.provider_score, valid=True)
+    except ValueError as exc:
+        report.update(valid=False, error=str(exc), raw=None if text is None else text[:300])
+    if save_fixture and report["valid"]:
+        # The request body carries no credentials (the key is only in the Authorization header).
+        JEV_TACTICAL_FIXTURE.parent.mkdir(parents=True, exist_ok=True)
+        JEV_TACTICAL_FIXTURE.write_text(json.dumps({
+            "_meta": {"endpoint": config.models.jev.endpoint, "captured_at": datetime.now(UTC).isoformat(
+                timespec="seconds"), "latency_ms": call.latency_ms,
+                "note": "Sanitized live response from 'dave-agent probe-provider --provider jev --purpose "
+                        "tactical --save-fixture'; no credentials included."},
+            "request": model.body(request), "response": json.loads(text)}, indent=2) + "\n", encoding="utf-8")
+        report["fixture"] = str(JEV_TACTICAL_FIXTURE)
     print(json.dumps(report, indent=2))
     return 0 if report["valid"] else 1
 
@@ -280,9 +404,12 @@ def build_parser() -> argparse.ArgumentParser:
     play = sub.add_parser("play", help="run one episode for an experiment arm")
     play.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     play.add_argument("--arm", required=True)
-    play.add_argument("--mock", action="store_true", help="offline mock tactical controllers (required for now)")
+    play.add_argument("--mock", action="store_true", help="mock tactical controller (the default); excludes --tactical live")
     play.add_argument("--planner", choices=["mock", "live"], default="mock",
                       help="strategic planner: offline rule planner (default) or Azure OpenAI (paid)")
+    play.add_argument("--tactical", choices=["mock", "live"], default="mock",
+                      help="tactical controller: seeded mock (default) or the arm's live model (paid): "
+                           "Azure OpenAI for tactical: llm, Jev for tactical: jev")
     play.add_argument("--adapter", choices=["fixture", "dave"])
     play.add_argument("--scenario")
     play.add_argument("--seed", type=int, default=0)
@@ -295,7 +422,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     probe_provider = sub.add_parser("probe-provider", help="one small paid call to check a live provider contract")
     probe_provider.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
-    probe_provider.add_argument("--provider", choices=["azure"], required=True)
+    probe_provider.add_argument("--provider", choices=["azure", "jev"], required=True)
+    probe_provider.add_argument("--purpose", choices=["planner", "tactical"],
+                                help="default: planner for azure, tactical for jev")
+    probe_provider.add_argument("--save-fixture", action="store_true",
+                                help="jev: write the sanitized request/response to tests/fixtures/jev/")
     probe_provider.set_defaults(func=_cmd_probe_provider)
 
     export = sub.add_parser("export", help="write the episode store (or one run) as JSONL")

@@ -3,9 +3,13 @@ models:
   planner:
     provider: azure_openai
     deployment_env: AZURE_OPENAI_CHAT_DEPLOYMENT
+    max_completion_tokens: 2000   # includes reasoning tokens
+    reasoning_effort: low         # verified accepted by gpt-5.4-mini (2026-10-03)
   tactical_llm:
     provider: azure_openai
     deployment_env: AZURE_OPENAI_CHAT_DEPLOYMENT
+    max_completion_tokens: 2000
+    reasoning_effort: low
   jev:
     provider: openrouter_decisions
     endpoint: https://openrouter.ai/api/alpha/decisions

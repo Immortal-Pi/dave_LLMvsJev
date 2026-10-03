@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Annotated, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, NonNegativeInt, ValidationError, model_validator
 
 PositiveInt = Annotated[int, Field(gt=0)]
 
@@ -28,9 +28,14 @@ class EnvironmentConfig(Strict):
     decision_frames: PositiveInt
 
 
+ReasoningEffort = Literal["none", "minimal", "low", "medium", "high"]
+
+
 class AzureModelConfig(Strict):
     provider: Literal["azure_openai"]
     deployment_env: str
+    max_completion_tokens: PositiveInt  # includes reasoning tokens
+    reasoning_effort: ReasoningEffort | None  # None: omit the parameter
 
 
 class JevModelConfig(Strict):
@@ -108,9 +113,23 @@ class ExecutorConfig(Strict):
     hazard_radius_px: PositiveInt
 
 
+class ReachConfig(Strict):
+    """Measured movement for estimated reachability (control/reach.py)."""
+
+    arc_px: tuple[NonNegativeInt, ...] = Field(min_length=2)  # rise above the start by tick of a jump
+    air_px_per_tick: PositiveInt  # sideways speed while a direction is held in the air
+    walk_px_per_3_ticks: PositiveInt  # walking speed
+    fall_px_per_tick: PositiveInt  # free fall after the arc or off an edge
+    short_hold_ticks: PositiveInt  # how long the *_short jumps hold the direction
+    body_px: tuple[NonNegativeInt, NonNegativeInt]  # x offsets of the wall-collision box's left/right edge
+    foot_px: tuple[NonNegativeInt, NonNegativeInt]  # x offsets of the two points that need ground under them
+
+
 class SkillsConfig(Strict):
     executor: ExecutorConfig
     catalogs: dict[Literal["fixture", "dave"], tuple[SkillSpec, ...]]
+    # Per adapter; an adapter without an entry gets no reachability waypoints.
+    reach: dict[Literal["fixture", "dave"], ReachConfig] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def _unique(self) -> SkillsConfig:
@@ -182,6 +201,21 @@ class PlanningConfig(Strict):
     nearest_collectibles: Annotated[int, Field(ge=0)]  # score items offered as collect goals
 
 
+class TacticalConfig(Strict):
+    """Shared policy for model-backed tactical controllers (docs/tactical.md)."""
+
+    # Per-episode budgets, checked before every tactical call. Tokens and cost count only
+    # when the provider reports them; null disables that budget.
+    max_calls_per_episode: PositiveInt
+    max_tokens_per_episode: PositiveInt | None
+    max_cost_usd_per_episode: Annotated[float, Field(gt=0)] | None
+    # terminate: end the episode as truncated (budget:<name>); fallback: keep playing with
+    # deterministic fallback decisions and no further calls.
+    on_budget_exhausted: Literal["terminate", "fallback"]
+    # Deterministic legal fallback: the first offered skill in this list, else the first offered candidate.
+    fallback_skills: tuple[str, ...]
+
+
 class BenchmarkConfig(Strict):
     pilot_trials: PositiveInt
     initial_trials: PositiveInt
@@ -206,6 +240,7 @@ class AppConfig(Strict):
     memory: MemoryConfig
     graph: GraphConfig
     planning: PlanningConfig
+    tactical: TacticalConfig
     benchmark: BenchmarkConfig
     arms: dict[str, ArmConfig]
 

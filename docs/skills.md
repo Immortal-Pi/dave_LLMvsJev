@@ -75,8 +75,8 @@ A predicate whose field is unavailable returns False, so the skill is masked rat
 | `move_left_1` / `move_right_1` | single | alive | dir → 24 ticks (1 tile) | 24 |
 | `move_left_3` / `move_right_3` | single | alive | dir → 72 ticks (3 tiles) | 72 |
 | `jump_up` | macro | on_ground | jump → until `jumping` (≤ 6); none → until `landed` (≤ 200) | 206 |
-| `jump_left` / `jump_right` | macro | on_ground | jump+dir → until `jumping` (≤ 6); dir → until `landed` (≤ 200) | 206 |
-| `jump_left_short` / `jump_right_short` | macro | on_ground | jump+dir → until `jumping` (≤ 6); dir → 32; none → until `landed` (≤ 200) | 238 |
+| `jump_left` / `jump_right` | macro | on_ground | jump → until `jumping` (≤ 6); dir → until `landed` (≤ 200) | 206 |
+| `jump_left_short` / `jump_right_short` | macro | on_ground | jump → until `jumping` (≤ 6); dir → 32; none → until `landed` (≤ 200) | 238 |
 | `shoot` | single | alive, has_gun, facing_side, no_bullet | fire → 1 tick | 1 |
 | `wait_short` | single | alive | none → 6 ticks (covers the 5-tick landing cooldown) | 6 |
 | `wait_long` | single | — (always legal) | none → 24 ticks | 24 |
@@ -92,5 +92,9 @@ The fixture catalog keeps its Phase 1 skills (1–3 frame holds), so fixture res
 ## Known limitations
 
 - Episodes are truncated at the first decision point after `max_episode_frames`, so an episode can overrun by up to one skill (≤ 238 frames).
-- The landing cooldown is hidden state, so a jump requested within 5 ticks of landing spends those ticks in its first phase. With a direction held, Dave walks during them.
+- The landing cooldown is hidden state, so a jump requested within 5 ticks of landing spends those ticks in its first phase. Sideways jumps therefore press **only Up** until the jump starts and add the direction afterwards (changed 2026-10-03). Holding the direction during the cooldown walked Dave off 1-tile pillars before takeoff (level 1). Re-measured: flat-ground dx (94 / 32 px) and frames are unchanged, and `calibrate_skills.py` passes 12/12.
+- **Level 1 is completable with the catalog** (`scripts/try_skills.py`, deterministic, 554 frames):
+  `move_right_3 move_right_3 move_right_1 jump_right jump_right jump_left jump_right move_right_3 move_left_3 move_left_3`.
+  This walks right, jumps onto the row-8 platform (11,7) and the pillar (13,5), takes the trophy from the pillar (11,3), lands at (16,7), drops through the gap at column 17 and walks left into the door.
+- Every recent-history entry shown to the planner and tactical models carries `moved_px`, the observed displacement. `[0, 0]` marks a skill that did not move Dave: a walk into a wall, or a jump blocked by the tile above. Those skills still report `completed`, because nothing failed.
 - Climbing and jetpack skills are absent until verified.

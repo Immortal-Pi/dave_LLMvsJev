@@ -6,7 +6,7 @@
 | `src/dave_agent/models/planner.py` | `GoalCandidate`, `PlanningRequest`, `PlanChoice`, `parse_plan`, the `StrategicPlanner` protocol, `RuleMockPlanner`, `ScriptedPlanner` |
 | `src/dave_agent/models/azure.py` | `AzureChatClient` (httpx, transport retries) and `AzurePlanner` (system prompt, strict JSON schema) |
 
-The planner chooses **what** to do next. The tactical controller (mock for now; LLM in Phase 7, Jev in Phase 8) chooses **how**, one skill at a time. Every arm runs the same goal-manager code with the same `planning:` settings. Graph-enabled arms differ in one way only: Python adds learned-route summaries to the candidates and turns the chosen goal into a route waypoint. A test checks this.
+The planner chooses **what** to do next. The tactical controller (mock offline, live LLM for arm A, live Jev for arms B and C; see `docs/tactical.md`) chooses **how**, one skill at a time. Every arm runs the same goal-manager code with the same `planning:` settings. Graph-enabled arms differ in one way only: Python adds learned-route summaries to the candidates and turns the chosen goal into a route waypoint. A test checks this.
 
 ## Candidate goals: the planner chooses, Python validates
 
@@ -55,7 +55,7 @@ Goals are checked after every skill, never per frame. Event payloads carry `goal
 | --- | --- | --- |
 | `no_goal` | hard | episode start, a level change, or no active goal |
 | `goal_achieved`, `goal_failed`, `goal_expired` | hard | lifecycle |
-| `death` | soft, latched | `death` event |
+| `death` | soft, latched | `death` event. A death also **ends the active goal** (`goal_failed`, reason `death`), because Dave respawns at the level start. That hard trigger replans at the respawn, inside any debounce window, so no stale goal or waypoint survives a death. |
 | `stuck` | soft | `Progress.stuck`: no progress for `planning.no_progress_frames` (a new goal restarts the clock) |
 | `repeated_failures` | soft | `planning.repeated_skill_failures` consecutive failed or interrupted skills **since the last plan** |
 | `inventory_changed` | soft, latched | the set of held items changed (not fuel draining or score) |
@@ -117,7 +117,13 @@ Arms A and B send identical requests (tested on the fixture and on the real game
 
 ## Known limitations
 
-- `stuck` uses distance to the waypoint. A mock tactical controller ignores goals, so mock runs mostly show `stuck` and expiry triggers. Goal-directed play starts with the Phase 7 LLM controller.
+- `stuck` uses distance to the waypoint. A mock tactical controller ignores goals, so mock runs mostly show `stuck` and expiry triggers. The live LLM controller (`--tactical live`) receives the goal and waypoint.
 - At fixture scale (41-frame episodes) the 60-frame debounce hides death triggers. Tests set it to 0. Calibrate all `planning:` values on Dave in Phase 9.
 - A planner re-choosing the same target on a soft trigger restarts its deadline. The call cap bounds this.
 - Explore targets are a direction and a column, not a verified reachable location.
+
+## Reachability waypoints (every arm)
+
+When the adapter has a `skills.reach` entry (Dave), the goal's `next_waypoint` is the **next landing spot** on an estimated route over the tiles observed this level (`control/reach.py`), not the far target. Graph-enabled arms keep their learned route whenever it has one. The waypoint is recomputed after every skill, and it is the target itself when no route is known or only walking is left. Each offered candidate's description also gets its estimated end tile, e.g. `estimated end tile [11, 7]`, or `(no movement)` / `estimated: no safe landing`. Every arm gets the same annotations, and the recorded candidate set and its digest are unchanged.
+
+The estimate simulates the catalog's own jump shapes with measured movement: the 95-tick jump arc, 1 px/tick air control and fall, 2 px per 3 ticks walking, and the foot and body offsets. It reproduces every real-game landing in `test_reach.py`. On level 1 its route (trophy via (4,7), (6,7), (9,5), (11,3); door via (16,7) and the gap at (17,9)) completes the level in the real game.

@@ -3,8 +3,9 @@
 Lifecycle: absent -> planned (a validated choice) -> active (in working memory) -> achieved,
 failed or expired. The planner only chooses among candidates generated here from observed
 facts, so an unknown target is rejected by a membership check. Every arm runs this same code
-with the same settings; graph-enabled arms additionally get learned-route summaries and a
-route-derived waypoint computed in Python (see docs/planner.md).
+with the same settings. The waypoint is the next landing spot on an estimated route over the
+observed tiles (control/reach.py, when the adapter has a reach envelope), else the target;
+graph-enabled arms use their learned route instead whenever it has one (see docs/planner.md).
 """
 
 from __future__ import annotations
@@ -13,7 +14,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from dave_agent.config import GraphConfig, PlanningConfig
+from dave_agent.config import GraphConfig, PlanningConfig, ReachConfig, SkillSpec
+from dave_agent.control.reach import ReachMap, estimate_end, next_waypoint
 from dave_agent.control.skills import ExecutionResult
 from dave_agent.memory.graph import STANDING_STATES, WorldGraph
 from dave_agent.memory.routes import Route, RouteTracker, find_route, held_items
@@ -27,7 +29,7 @@ from dave_agent.models.planner import (
     priority,
     rule_choice,
 )
-from dave_agent.schemas import Event, Goal, ModelCallRecord, Observation, TilePos
+from dave_agent.schemas import Event, Goal, ModelCallRecord, Observation, SkillCandidate, TilePos
 
 TARGET_KINDS = frozenset({"required_item", "item", "collectible", "exit"})
 # Hard triggers always plan (within the call cap); soft triggers are debounced.
@@ -231,11 +233,12 @@ def _route_summary(route: Route, graph: WorldGraph) -> dict[str, Any]:
 
 class GoalManager:
     def __init__(self, planner: StrategicPlanner, planning: PlanningConfig, max_retries: int,
-                 graph: WorldGraph | None = None, graph_cfg: GraphConfig | None = None) -> None:
+                 graph: WorldGraph | None = None, graph_cfg: GraphConfig | None = None,
+                 reach: ReachConfig | None = None) -> None:
         if (graph is None) != (graph_cfg is None):
             raise ValueError("graph and graph_cfg go together")
         self.planner, self.cfg, self.max_retries = planner, planning, max_retries
-        self.graph, self.graph_cfg = graph, graph_cfg
+        self.graph, self.graph_cfg, self.reach = graph, graph_cfg, reach
         self.targets = TargetMemory()
         self._reset_state()
 
@@ -252,10 +255,13 @@ class GoalManager:
         self._held: frozenset[str] = frozenset()
         self._tracker: RouteTracker | None = None
         self._goal_start = 0
+        self._cells: dict[tuple[int, int], str] = {}  # observed tiles this level, for reachability
+        self._cells_level: str | None = None
 
     # -- observation feed ------------------------------------------------------------------
     def reset(self, obs: Observation, memory: WorkingMemory) -> PlanningStep:
         self._reset_state()
+        self._learn(obs)
         self.targets.reset(obs)
         self.level_id = obs.level_id
         self._held = held_items(obs.inventory)
@@ -269,6 +275,7 @@ class GoalManager:
                run: ExecutionResult | None = None) -> PlanningStep:
         """After each executed skill: end the goal if due, collect triggers, maybe plan."""
         step = PlanningStep()
+        self._learn(obs)
         if self.goal is not None:
             ended = evaluate(self.goal, self.level_id or obs.level_id, obs, events, self.targets)
             if ended is not None:
@@ -279,6 +286,11 @@ class GoalManager:
             self._pending.add("no_goal")
         if any(e.event_type == "death" for e in events):
             self._pending.add("death")
+            # Dave respawns at the level start, so the goal's route and waypoint are stale: end it
+            # now. The goal_failed hard trigger then replans at respawn, inside any debounce window.
+            if self.goal is not None:
+                step.events.append(self._end(obs, "failed", "death"))
+                memory.set_goal(None)
         held = held_items(obs.inventory)
         if held != self._held:
             self._held = held
@@ -287,6 +299,8 @@ class GoalManager:
             self._failures = self._failures + 1 if run.outcome in FAILED_OUTCOMES else 0
         if self.goal is not None and self.graph is not None:
             self._follow_route(obs, memory, run)
+        if self.goal is not None:
+            self._follow_reach(obs, memory)
         planned = self._maybe_plan(obs, memory)
         planned.events[:0] = step.events
         return planned
@@ -418,11 +432,68 @@ class GoalManager:
             route = _route_summary(planned, self.graph)
             self._tracker = RouteTracker(planned, self.graph, obs.inventory)
             goal = goal.model_copy(update={"next_waypoint": self._waypoint(planned, goal)})
+        waypoint = self._reach_waypoint(obs, goal)
+        if waypoint is not None:
+            goal = goal.model_copy(update={"next_waypoint": waypoint})
         self.goal, self.status, self._goal_start = goal, "active", obs.frame
         memory.set_goal(goal)
         self._pending.clear()
         self._failures = 0
         return goal, route
+
+    # -- estimated reachability (every arm with a reach envelope) ----------------------------
+    def _learn(self, obs: Observation) -> None:
+        """Remember every observed cell of this level (empty cells too) for reachability."""
+        if self.reach is None:
+            return
+        if obs.level_id != self._cells_level:
+            self._cells, self._cells_level = {}, obs.level_id
+        region = obs.region
+        for col in range(region.min.col, region.max.col + 1):
+            for row in range(region.min.row, region.max.row + 1):
+                self._cells[(col, row)] = "empty"
+        for t in obs.tiles:
+            self._cells[(t.pos.col, t.pos.row)] = t.kind
+
+    def _reach_waypoint(self, obs: Observation, goal: Goal) -> TilePos | None:
+        """The next landing spot on the estimated route to the goal's target; the target itself
+        when there is no known route; None when not applicable (no envelope, a graph arm with a
+        learned route, or Dave not standing)."""
+        if self.reach is None or obs.player_position is None or obs.player_state not in STANDING_STATES:
+            return None
+        if self._tracker is not None and self._tracker.route.status == "found":
+            return None  # graph arms follow their learned route
+        final = _goal_tile(goal)
+        reach = ReachMap(self._cells, self.reach)
+        here = reach.locate(obs.player_position.x, obs.player_position.y)
+        cell = None if here is None else next_waypoint(reach, here, (final.col, final.row))
+        return final if cell is None else TilePos(col=cell[0], row=cell[1])
+
+    def annotate(self, obs: Observation, candidates: list[SkillCandidate],
+                 skills: tuple[SkillSpec, ...]) -> list[SkillCandidate]:
+        """Each candidate with its estimated end tile appended to the description (the same
+        estimate for every arm). Unchanged without a reach envelope or while Dave is not standing."""
+        if self.reach is None or obs.player_position is None or obs.player_state not in STANDING_STATES:
+            return candidates
+        reach = ReachMap(self._cells, self.reach)
+        here = reach.locate(obs.player_position.x, obs.player_position.y)
+        if here is None:
+            return candidates
+        specs = {s.name: s for s in skills}
+        out = []
+        for c in candidates:
+            end = estimate_end(reach, here, specs[c.skill])
+            note = ("estimated: no safe landing" if end is None
+                    else f"estimated end tile [{end[0]}, {end[1]}]" + (" (no movement)" if end == here else ""))
+            out.append(c.model_copy(update={"description": f"{c.description}; {note}"[:200]}))
+        return out
+
+    def _follow_reach(self, obs: Observation, memory: WorkingMemory) -> None:
+        assert self.goal is not None
+        waypoint = self._reach_waypoint(obs, self.goal)
+        if waypoint is not None and waypoint != self.goal.next_waypoint:
+            self.goal = self.goal.model_copy(update={"next_waypoint": waypoint})
+            memory.set_goal(self.goal, restart_clock=False)
 
     # -- learned routes (graph-enabled arms only) -------------------------------------------
     def _target_node(self, obs: Observation, candidate: GoalCandidate, start: str | None) -> str | None:
@@ -506,7 +577,8 @@ class GoalManager:
                     nearby.append({"type": e.entity_type, "kind": "entity", "tile": [tile.col, tile.row]})
         recent = tuple(
             {"skill": e.skill, "outcome": e.outcome, "reason": e.reason, "events": list(e.events),
-             "end_tile": [e.end_tile.col, e.end_tile.row] if e.end_tile else None}
+             "end_tile": [e.end_tile.col, e.end_tile.row] if e.end_tile else None,
+             "moved_px": e.moved_px}
             for e in memory.history[-self.cfg.recent_events:]
         )
         return PlanningRequest(

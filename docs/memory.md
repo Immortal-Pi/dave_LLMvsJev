@@ -14,7 +14,7 @@ Replay lives in `src/dave_agent/runner/replay.py`. Learned graph memory is Phase
 
 `WorkingMemory` is a typed Python object built only from observations and executions, with no database access. The runner calls:
 - `reset(observation)` at every episode start;
-- `record(decision, execution)` after every skill;
+- `record(decision, execution)` after every skill (the episode recorder's `record` also takes every model call made for the decision, retries included; see `docs/tactical.md`);
 - `context()` before every model call.
 
 The goal manager (`docs/planner.md`) calls `set_goal(goal)` for a new goal, which restarts the no-progress clock. It calls `set_goal(goal, restart_clock=False)` when only the route waypoint moves.
@@ -44,7 +44,7 @@ Every arm builds the identical memory, which `tests/unit/test_arm_parity.py` ass
 **`MemoryContext`** is the only memory a controller receives. It is passed as `decide(observation, goal, candidates, memory)`.
 - It is deterministic and bounded: the latest entry, motion, progress and the last `memory.context_entries` (8) entries.
 - It never contains a transcript or anything from the episode store.
-- Mock controllers ignore it. The live LLM and Jev controllers (Phases 7–8) will render it into their requests.
+- Mock controllers ignore it. The live LLM and Jev models get it through the shared tactical request (`docs/tactical.md`).
 
 Limits: the 120-frame window is fixture-scale. A Dave jump takes 94 frames, so on Dave the window holds only a few entries. Tune it with the planner (Phase 6).
 
@@ -62,7 +62,7 @@ The goal manager emits `goal_set`, `goal_achieved` and `goal_failed` (`certainty
 
 ## Episode store (SQLite)
 
-The store lives at `memory.episode_store` (default `artifacts/events.sqlite`, gitignored). It uses only the standard-library `sqlite3`, with `PRAGMA foreign_keys = ON`. The schema version is held in `PRAGMA user_version` (currently 1):
+The store lives at `memory.episode_store` (default `artifacts/events.sqlite`, gitignored). It uses only the standard-library `sqlite3`, with `PRAGMA foreign_keys = ON`. The schema version is held in `PRAGMA user_version` (currently 2; version 2 added `decisions.context_digest` and `model_calls.output_json`):
 - a store with any other version is refused with an actionable error;
 - so is a non-store SQLite file.
 
@@ -71,8 +71,8 @@ The store lives at `memory.episode_store` (default `artifacts/events.sqlite`, gi
 | `runs` | `run_id` | `mode` (`mock` / `live`), command, full config JSON |
 | `episodes` | `episode_key` = `run_id/episode_id` | → runs. It holds arm, controller label, adapter, build, scenario, seed, outcome, `termination_reason`, frames, score, lives, deaths, decisions and model calls. `outcome` stays NULL if the process dies mid-episode. |
 | `observations` | (episode, `observation_id`) | the full `Observation` JSON. Only decision-point observations (the start and end of each skill) are stored. |
-| `model_calls` | (episode, seq) | provider, model, purpose, status, latency, retries, usage, cost and cost source, and sanitized request/response refs |
-| `decisions` | (episode, seq) | → the observation it was made on, and → its model call (NULL when forced). It also holds the offered candidate ids, the mask and the digest. |
+| `model_calls` | (episode, seq) | provider, model, purpose, status, latency, retries, usage, cost and cost source, sanitized request/response refs, and `output` (provider answer details as reported, e.g. Jev probabilities and confidence; NULL otherwise) |
+| `decisions` | (episode, seq) | → the observation it was made on, and → its model call (NULL when forced). It also holds the offered candidate ids, the mask, the candidate digest and the `context_digest` of the tactical request (NULL when forced). |
 | `skill_executions` | (episode, decision seq) | → its decision, and → its start and end observations. It holds outcome, reason, frames and input ticks. |
 | `events` | (episode, seq) | every adapter, executor and derived event in order, → the skill execution it occurred during (NULL for episode-level events) |
 

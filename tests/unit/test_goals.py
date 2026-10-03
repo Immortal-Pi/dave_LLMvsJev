@@ -157,8 +157,19 @@ def test_death_triggers_after_respawn_not_while_burning(config):
     assert gm.update(burning, mem, [event("death")]).calls == []  # latched: inputs are ignored now
     respawned = o(player=(1, 3), state="blinking", frame=20, oid=3)
     step = gm.update(respawned, mem, [])
-    assert step.record.triggers == ("death",) and len(planner.requests) == 2
+    assert step.record.triggers == ("death", "goal_failed") and len(planner.requests) == 2
     assert "recover:safe" not in step.record.request.candidate_ids  # no completed skill yet
+
+
+def test_death_ends_goal_and_replans_at_respawn_inside_debounce(config):
+    gm, planner, mem, _ = started(config, min_frames_between_calls=1000)
+    burning = o(state="burning", grounded=False, frame=10, oid=2)
+    step = gm.update(burning, mem, [event("death")])
+    assert step.calls == [] and [e.event_type for e in step.events] == ["goal_failed"]
+    assert step.events[0].payload["reason"] == "death"
+    assert gm.goal is None and mem.context().goal is None  # no stale waypoint while burning
+    step = gm.update(o(player=(1, 3), state="blinking", frame=20, oid=3), mem, [])
+    assert "goal_failed" in step.record.triggers and gm.goal is not None and len(planner.requests) == 2
 
 
 def test_soft_triggers_are_debounced_and_latched(config):
@@ -210,7 +221,7 @@ def test_malformed_output_bounded_then_fallback(config):
 
 def test_failed_call_keeps_current_goal_on_soft_trigger(config):
     gm, planner, mem, _ = started(config, [choose("collect:gem:c4:r3"), None, None])
-    step = gm.update(o(frame=10, oid=2), mem, [event("death")])
+    step = gm.update(o(inventory={"trophy": 1}, frame=10, oid=2), mem, [])
     assert [c.status for c in step.calls] == ["error", "error"] and step.record is None
     assert gm.goal.target_ref == "collect:gem:c4:r3"
-    assert gm.update(o(frame=20, oid=3), mem, []).calls == []  # the trigger was consumed
+    assert gm.update(o(inventory={"trophy": 1}, frame=20, oid=3), mem, []).calls == []  # trigger consumed

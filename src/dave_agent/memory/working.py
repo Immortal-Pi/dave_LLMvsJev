@@ -47,6 +47,14 @@ class HistoryEntry(Contract):
     def end_tile(self) -> TilePos | None:
         return player_tile(self.end_position) if self.end_position else None
 
+    @property
+    def moved_px(self) -> list[int] | None:
+        """Observed displacement [dx, dy] in pixels from the skill's start to its end ([0, 0]: Dave
+        did not move, e.g. walking into a wall or a jump blocked by the tile above)."""
+        if self.start_position is None or self.end_position is None:
+            return None
+        return [self.end_position.x - self.start_position.x, self.end_position.y - self.start_position.y]
+
 
 class Motion(Contract):
     """Pixel displacement from the window start (or the last respawn) to now."""

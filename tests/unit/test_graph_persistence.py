@@ -104,8 +104,8 @@ class Scripted:
         name = self.skills.pop(0) if self.skills else "wait"
         chosen = next(c for c in candidates if c.skill == name)
         return (Decision(candidate_id=chosen.candidate_id, observation_id=observation.observation_id),
-                ModelCallRecord(provider="scripted", model="scripted", purpose="tactical", latency_ms=0.0,
-                                status="ok"))
+                (ModelCallRecord(provider="scripted", model="scripted", purpose="tactical", latency_ms=0.0,
+                                 status="ok"),))
 
 
 def test_route_learned_in_fixture_episode_survives_restart(config, tmp_path):

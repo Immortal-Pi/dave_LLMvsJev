@@ -1,10 +1,12 @@
+# Watching / demo config: identical to experiments.yaml except for episode length, wall time and
+# the store file. Not for benchmark results. Use: dave-agent play ... --watch --config configs/watch.yaml
 schema_version: 1
 scenario: fixture_l1          # dave scenarios: level1 .. level9
 memory:
   recent_history_frames: 120   # working-memory window in simulation frames
   max_history_entries: 64      # hard cap on the recent-history deque
   context_entries: 8           # recent entries shown to controllers
-  episode_store: artifacts/events.sqlite
+  episode_store: artifacts/watch.sqlite
   store_batch_size: 200        # rows buffered before one SQLite write
   graph_enabled: false
   graph_checkpoint: null
@@ -33,8 +35,8 @@ tactical:
 benchmark:
   pilot_trials: 5
   initial_trials: 30
-  max_episode_frames: 600      # fixture scale; Dave value calibrated in Phase 9
-  max_episode_wall_seconds: 900
+  max_episode_frames: 18000    # watch a whole level (experiments.yaml: 600)
+  max_episode_wall_seconds: 3600
   paid_run_budget_usd: 5
   randomize_arm_order: true
 arms:

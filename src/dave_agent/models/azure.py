@@ -1,8 +1,9 @@
-"""Azure OpenAI Chat Completions client and the LLM strategic planner.
+"""Azure OpenAI Chat Completions client, the LLM strategic planner and the LLM tactical model.
 
 Plain httpx; credentials come from the environment (``.env``, see ``.env.example``) and are
 never logged. Transport failures (timeouts, 429, 5xx) are retried up to ``max_retries`` with
-exponential backoff; output validation and its retry belong to the goal manager.
+exponential backoff; output validation and its retry belong to the goal manager (planner)
+and ``models.tactical.ModelController`` (tactical).
 No price table is assumed, so ``cost_usd`` stays None; token usage is recorded as reported.
 """
 
@@ -20,13 +21,14 @@ import httpx
 from dotenv import load_dotenv
 
 from dave_agent.config import ConfigError
-from dave_agent.logging_setup import redact
+from dave_agent.models.http import post_json
 from dave_agent.models.planner import PlanningRequest
+from dave_agent.models.tactical import GAME_RULES, INPUT_GUIDE, TACTICAL_TASK, TacticalChoice, TacticalRequest, \
+    parse_tactical
 from dave_agent.schemas import ModelCallRecord
 
 log = logging.getLogger(__name__)
 
-RETRY_STATUS = frozenset({408, 429, 500, 502, 503, 504})
 
 
 @dataclass(frozen=True)
@@ -74,6 +76,7 @@ class AzureChatClient:
     def __init__(self, settings: AzureSettings, timeout_seconds: float, max_retries: int,
                  transport: httpx.BaseTransport | None = None, sleep: Callable[[float], None] = time.sleep) -> None:
         self.settings, self.max_retries, self._sleep = settings, max_retries, sleep
+        self.timeout_seconds = timeout_seconds
         self._client = httpx.Client(timeout=timeout_seconds, transport=transport)
 
     @property
@@ -82,59 +85,32 @@ class AzureChatClient:
         return f"{s.endpoint.rstrip('/')}/openai/deployments/{s.deployment}/chat/completions"
 
     def complete(self, body: dict) -> ChatResult:
-        started = time.monotonic()
-        attempt, error, status = 0, None, "error"
-        while True:
-            try:
-                response = self._client.post(self.url, params={"api-version": self.settings.api_version},
-                                             headers={"api-key": self.settings.api_key}, json=body)
-            except httpx.TimeoutException as exc:
-                status, error = "timeout", f"timeout: {type(exc).__name__}"
-            except httpx.HTTPError as exc:
-                status, error = "error", f"transport: {type(exc).__name__}"
-            else:
-                if response.status_code == 200:
-                    return self._parse(response.json(), started, attempt)
-                status = "error"
-                error = redact(f"HTTP {response.status_code}: {response.text[:300]}")
-                if response.status_code not in RETRY_STATUS:
-                    break
-            if attempt >= self.max_retries:
-                break
-            attempt += 1
-            self._sleep(min(2.0 ** attempt, 8.0))
-        log.warning("azure chat call failed: %s", error)
-        return ChatResult(status=status, text=None, latency_ms=_ms(started), retries=attempt, error=error)
-
-    def _parse(self, data: dict, started: float, attempt: int) -> ChatResult:
+        result = post_json(self._client, self.url, params={"api-version": self.settings.api_version},
+                           headers={"api-key": self.settings.api_key}, body=body,
+                           max_retries=self.max_retries, sleep=self._sleep)
+        if result.status != "ok":
+            log.warning("azure chat call failed: %s", result.error)
+            return ChatResult(status=result.status, text=None, latency_ms=result.latency_ms,
+                              retries=result.retries, error=result.error)
+        data = result.data or {}
         choice = (data.get("choices") or [{}])[0]
         message = choice.get("message") or {}
-        return ChatResult(status="ok", text=message.get("content"), latency_ms=_ms(started), retries=attempt,
-                          usage=_usage(data.get("usage")), response_id=data.get("id"),
-                          finish_reason=choice.get("finish_reason"),
-                          error=message.get("refusal"))
+        return ChatResult(status="ok", text=message.get("content"), latency_ms=result.latency_ms,
+                          retries=result.retries, usage=_usage(data.get("usage")), response_id=data.get("id"),
+                          finish_reason=choice.get("finish_reason"), error=message.get("refusal"))
 
     def close(self) -> None:
         self._client.close()
 
 
-def _ms(started: float) -> float:
-    return round((time.monotonic() - started) * 1000, 1)
 
-
-# Only rules verified in docs/feasibility.md section 3 (deadly-dave source) are stated here.
-SYSTEM_PROMPT = """You are the strategic planner for an agent playing Dangerous Dave (the deadly-dave reimplementation).
+SYSTEM_PROMPT = f"""You are the strategic planner for an agent playing Dangerous Dave (the deadly-dave reimplementation).
 You choose the agent's next objective. A separate tactical controller executes short movement skills toward it.
 
-Game rules (verified):
-- Dave walks left/right, jumps, and can fire the gun only after collecting it. There is no ducking and no health bar: Dave has lives.
-- The level is completed by touching the door while holding the trophy. Touching the door without the trophy does nothing.
-- Fire, water and vines set Dave burning; touching a monster or its plasma does too. Burning ends in death, then Dave respawns at the level start. The game is over at 0 lives.
-- Loot (gems etc.) only adds score. The gun lets Dave shoot monsters. Falling off the bottom of the screen wraps to the top; it is not a death.
-- Coordinates are tile (col, row); row 0 is the top. Only the local view and what was seen earlier this episode are known.
+{GAME_RULES}
 
 Choose exactly one goal id from `candidates`. Prefer progress toward completing the level, avoid repeating a goal that just failed, and consider the trigger that caused this planning call.
-Reply with JSON {"goal": "<candidate id>", "rationale": "<one short sentence, at most 200 characters>"}. Give a brief rationale only, not step-by-step reasoning."""
+Reply with JSON {{"goal": "<candidate id>", "rationale": "<one short sentence, at most 200 characters>"}}. Give a brief rationale only, not step-by-step reasoning."""
 
 
 def request_payload(request: PlanningRequest) -> dict:
@@ -151,6 +127,9 @@ class AzurePlanner:
         self.model = client.settings.deployment
         self.max_completion_tokens = max_completion_tokens
         self.reasoning_effort = reasoning_effort
+
+    def settings(self) -> dict:
+        return _effective(self.client, self.max_completion_tokens, self.reasoning_effort)
 
     def body(self, request: PlanningRequest, feedback: str | None = None) -> dict:
         messages = [{"role": "system", "content": SYSTEM_PROMPT},
@@ -171,9 +150,76 @@ class AzurePlanner:
     def propose(self, request: PlanningRequest, feedback: str | None = None) -> tuple[str | None, ModelCallRecord]:
         body = self.body(request, feedback)
         result = self.client.complete(body)
-        request_ref = "sha256:" + hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest()[:16]
         record = ModelCallRecord(provider=self.provider, model=self.model, purpose="planner",
                                  latency_ms=result.latency_ms, retries=result.retries, status=result.status,
-                                 usage=result.usage, request_ref=request_ref, response_ref=result.response_id)
-        log.debug("planner call %s status=%s finish=%s", request_ref, result.status, result.finish_reason)
+                                 usage=result.usage, request_ref=_request_ref(body), response_ref=result.response_id)
+        log.debug("planner call %s status=%s finish=%s", record.request_ref, result.status, result.finish_reason)
         return (result.text if result.status == "ok" else None), record
+
+
+def _effective(client: AzureChatClient, max_completion_tokens: int, reasoning_effort: str | None) -> dict:
+    """Effective model settings recorded with every run (no credentials)."""
+    return {"provider": "azure_openai", "deployment": client.settings.deployment,
+            "api_version": client.settings.api_version, "max_completion_tokens": max_completion_tokens,
+            "reasoning_effort": reasoning_effort, "timeout_seconds": client.timeout_seconds,
+            "transport_retries": client.max_retries}
+
+
+def _request_ref(body: dict) -> str:
+    return "sha256:" + hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest()[:16]
+
+
+TACTICAL_PROMPT = f"""You are the tactical controller for an agent playing Dangerous Dave (the deadly-dave reimplementation).
+The game is paused while you decide. You choose the next short skill; it runs to completion (or until interrupted by danger), then you choose again.
+
+{GAME_RULES}
+
+Input (JSON):
+{INPUT_GUIDE}
+
+{TACTICAL_TASK}
+Reply with JSON {{"candidate_id": "<one offered id>"}} and nothing else."""
+
+
+class AzureTacticalModel:
+    """LLM tactical model (arm A): one offered candidate id per call, enforced by a strict schema."""
+
+    provider = "azure_openai"
+
+    def __init__(self, client: AzureChatClient, max_completion_tokens: int = 2000,
+                 reasoning_effort: str | None = "low") -> None:
+        self.client = client
+        self.model = client.settings.deployment
+        self.max_completion_tokens = max_completion_tokens
+        self.reasoning_effort = reasoning_effort
+
+    def settings(self) -> dict:
+        return _effective(self.client, self.max_completion_tokens, self.reasoning_effort)
+
+    def body(self, request: TacticalRequest, feedback: str | None = None) -> dict:
+        payload = request.model_dump(mode="json", exclude={"episode_id", "observation_id"})
+        messages = [{"role": "system", "content": TACTICAL_PROMPT},
+                    {"role": "user", "content": json.dumps(payload, separators=(",", ":"))}]
+        if feedback:
+            messages.append({"role": "user", "content": f"Your previous answer was rejected: {feedback}. "
+                                                        "Answer again with one offered candidate id."})
+        schema = {"type": "object", "additionalProperties": False, "required": ["candidate_id"],
+                  "properties": {"candidate_id": {"type": "string", "enum": list(request.candidate_ids)}}}
+        body = {"messages": messages, "max_completion_tokens": self.max_completion_tokens,
+                "response_format": {"type": "json_schema",
+                                    "json_schema": {"name": "skill_choice", "strict": True, "schema": schema}}}
+        if self.reasoning_effort:
+            body["reasoning_effort"] = self.reasoning_effort
+        return body
+
+    def propose(self, request: TacticalRequest, feedback: str | None = None) -> tuple[str | None, ModelCallRecord]:
+        body = self.body(request, feedback)
+        result = self.client.complete(body)
+        record = ModelCallRecord(provider=self.provider, model=self.model, purpose="tactical",
+                                 latency_ms=result.latency_ms, retries=result.retries, status=result.status,
+                                 usage=result.usage, request_ref=_request_ref(body), response_ref=result.response_id)
+        log.debug("tactical call %s status=%s finish=%s", record.request_ref, result.status, result.finish_reason)
+        return (result.text if result.status == "ok" else None), record
+
+    def parse(self, text: str | None, allowed: tuple[str, ...]) -> TacticalChoice:
+        return parse_tactical(text, allowed)

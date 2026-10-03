@@ -24,16 +24,20 @@
 | `uv run pytest` | Offline test suite; no credentials needed |
 | `uv run pytest tests/unit/test_fixture_adapter.py::test_snapshot_round_trip` | Run a single test |
 | `uv run dave-agent probe --adapter fixture` | reset → step → changed observation |
-| `uv run dave-agent play --arm A --mock` | One offline fixture episode for an arm, logged to `artifacts/events.sqlite` (`--store`, `--run-id`) |
+| `uv run dave-agent play --arm A` | One offline fixture episode for an arm (the default; `--mock` says so explicitly), logged to `artifacts/events.sqlite` (`--store`, `--run-id`) |
 | `uv run dave-agent export --run-id RUN --out FILE.jsonl` | Export the episode store, or one run, as JSONL |
 | `uv run dave-agent replay --jsonl FILE.jsonl` | Re-run exported episodes and verify the recorded evidence |
 | `uv run dave-agent play --arm C --mock [--graph PATH]` | Graph-enabled arm: learns into `artifacts/graphs/arm-C/<adapter>.json` |
 | `uv run dave-agent play --arm A --mock --planner live [--adapter dave --scenario level1]` | **Live, paid**: Azure OpenAI strategic planner with the mock tactical controller (run mode `live-planner`) |
-| `uv run dave-agent probe-provider --provider azure` | **Live, paid**: one planner call; prints status, latency, usage and the validated choice |
+| `uv run dave-agent play --arm A --tactical live [--planner live] --adapter dave --scenario level1` | **Live, paid**: the arm's tactical model: Azure OpenAI for arm A, Jev for arms B and C (`--arm B` / `--arm C`). Run mode `live-tactical`, or `live` with the live planner. Prints the budget to stderr before any call |
+| `uv run dave-agent probe-provider --provider azure [--purpose tactical]` | **Live, paid**: one planner (default) or tactical call; prints status, latency, usage and the validated choice |
+| `uv run dave-agent play --arm B [--planner live --tactical live] --adapter dave --scenario level1 --watch --config configs/watch.yaml` | Watch a whole level: `configs/watch.yaml` is `experiments.yaml` with an 18000-frame cap, a 3600 s wall-time budget and its own store (`artifacts/watch.sqlite`). For watching and demos, not benchmark results |
+| `uv run dave-agent probe-provider --provider jev [--save-fixture]` | **Live, paid**: one Jev tactical call; prints the choice, probabilities, confidence, usage and cost. `--save-fixture` refreshes `tests/fixtures/jev/tactical_response.json` |
 | `uv run python scripts/probe_azure.py` | **Live, paid**: one planner call; refreshes `tests/fixtures/azure/planner_response.json` |
 | `uv run dave-agent graph --checkpoint PATH [--yaml OUT] [--route FROM TO --items trophy]` | Inspect a graph checkpoint, export YAML, search a route |
 | `scripts\setup_dave.bat` | Clone, patch and build deadly-dave plus the bridge (needs git and VS Build Tools 2022) |
 | `uv run python scripts/probe_environment.py` | Real-game acceptance checks; screenshots go to `artifacts/probe/` |
+| `uv run python scripts/try_skills.py [--scenario level1] SKILL ... [--extra-skills trial.yaml] [--watch]` | Free: run a fixed skill sequence on the real game and print each skill's start and end tile, outcome, score and inventory. Feasibility checks, and measuring trial skills before adding them |
 | `uv run python scripts/calibrate_skills.py` | Real-game skill calibration; checks the measurements against `configs/skills.yaml` and saves `artifacts/calibration/skills.json` |
 | `uv run dave-agent probe --adapter dave --scenario level1` | Real-game reset → step probe |
 | `uv run pytest -m "not dave"` | Skip the real-game tests |
@@ -57,6 +61,7 @@ uv run python scripts/probe_environment.py --watch
 - `configs/skills.yaml` holds one skill catalog per adapter (`skills.catalogs.fixture` and `.dave`) plus executor settings. Re-run the calibration script after changing Dave durations.
 - `graph:` in `configs/experiments.yaml` sets the route-cost weights and limits (see `docs/graph.md`).
 - `planning:` sets the planner triggers, debounce, call cap, goal timeout and planner context size (see `docs/planner.md`).
+- `tactical:` sets the per-episode tactical budgets, what happens when one runs out, and the fallback skills (see `docs/tactical.md`). `models.planner` and `models.tactical_llm` set `max_completion_tokens` and `reasoning_effort`.
 - Live tests are marked `live` and skip unless `RUN_LIVE=1` (e.g. `RUN_LIVE=1 uv run pytest -m live`).
 - `memory.*` in `configs/experiments.yaml` sets the working-memory limits and the episode store path and batch size (see `docs/memory.md`).
 - `configs/experiments.yaml` is the entry point. Its sibling files `environment.yaml`, `models.yaml` and `skills.yaml` are merged in, and each top-level key may appear in only one file.
