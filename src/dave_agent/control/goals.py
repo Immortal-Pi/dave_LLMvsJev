@@ -1,0 +1,522 @@
+"""Deterministic goal manager: candidate goals, goal lifecycle and shared planning triggers.
+
+Lifecycle: absent -> planned (a validated choice) -> active (in working memory) -> achieved,
+failed or expired. The planner only chooses among candidates generated here from observed
+facts, so an unknown target is rejected by a membership check. Every arm runs this same code
+with the same settings; graph-enabled arms additionally get learned-route summaries and a
+route-derived waypoint computed in Python (see docs/planner.md).
+"""
+
+from __future__ import annotations
+
+import time
+from dataclasses import dataclass, field
+from typing import Any
+
+from dave_agent.config import GraphConfig, PlanningConfig
+from dave_agent.control.skills import ExecutionResult
+from dave_agent.memory.graph import STANDING_STATES, WorldGraph
+from dave_agent.memory.routes import Route, RouteTracker, find_route, held_items
+from dave_agent.memory.working import FAILED_OUTCOMES, WorkingMemory, player_tile
+from dave_agent.models.planner import (
+    GoalCandidate,
+    PlanningRequest,
+    PlanOutputError,
+    StrategicPlanner,
+    parse_plan,
+    priority,
+    rule_choice,
+)
+from dave_agent.schemas import Event, Goal, ModelCallRecord, Observation, TilePos
+
+TARGET_KINDS = frozenset({"required_item", "item", "collectible", "exit"})
+# Hard triggers always plan (within the call cap); soft triggers are debounced.
+HARD_TRIGGERS = frozenset({"no_goal", "goal_achieved", "goal_failed", "goal_expired"})
+NO_PLANNING_STATES = frozenset({"burning", "dead"})  # inputs are ignored; plan after respawn
+NEARBY_TILES = 3  # hazards/monsters within this many tiles are summarized for the planner
+MAX_NEARBY = 10
+
+
+@dataclass
+class KnownTarget:
+    kind: str
+    name: str
+    col: int
+    row: int
+    present: bool
+    last_seen_frame: int
+
+
+class TargetMemory:
+    """Targets and hazards observed so far this episode on the current level. Only observed
+    facts: a target is marked absent once its tile is in view without it. Same for every arm."""
+
+    def __init__(self) -> None:
+        self.level_id: str | None = None
+        self.targets: dict[tuple[int, int, str], KnownTarget] = {}
+        self.hazards: set[tuple[int, int]] = set()
+        self.seen_cols: tuple[int, int] | None = None
+
+    def reset(self, obs: Observation) -> None:
+        self.level_id, self.targets, self.hazards, self.seen_cols = obs.level_id, {}, set(), None
+        self.observe(obs)
+
+    def observe(self, obs: Observation) -> None:
+        if obs.level_id != self.level_id:
+            self.level_id, self.targets, self.hazards, self.seen_cols = obs.level_id, {}, set(), None
+        region = obs.region
+        visible = {(t.pos.col, t.pos.row, t.kind): t for t in obs.tiles if t.kind in TARGET_KINDS}
+        for key, target in self.targets.items():
+            if region.contains(TilePos(col=target.col, row=target.row)):
+                target.present = key in visible
+                if target.present:
+                    target.last_seen_frame = obs.frame
+        for key, tile in visible.items():
+            if key not in self.targets:
+                self.targets[key] = KnownTarget(tile.kind, tile.name, key[0], key[1], True, obs.frame)
+        self.hazards |= {(t.pos.col, t.pos.row) for t in obs.tiles if t.kind == "hazard"}
+        lo, hi = region.min.col, region.max.col
+        self.seen_cols = (lo, hi) if self.seen_cols is None else (min(self.seen_cols[0], lo),
+                                                                  max(self.seen_cols[1], hi))
+
+    def present(self, kinds: frozenset[str] | set[str]) -> list[KnownTarget]:
+        return [t for t in self.targets.values() if t.present and t.kind in kinds]
+
+    def hazard_near(self, col: int, row: int) -> bool:
+        return any(abs(c - col) <= 1 and abs(r - row) <= 1 for c, r in self.hazards)
+
+
+# -- candidate goals ---------------------------------------------------------------------
+def _direction(here: TilePos, col: int, row: int) -> str:
+    dx, dy = col - here.col, row - here.row
+    parts = []
+    if dx:
+        parts.append(f"{abs(dx)} tiles {'right' if dx > 0 else 'left'}")
+    if dy:
+        parts.append(f"{abs(dy)} rows {'down' if dy > 0 else 'up'}")
+    return ", ".join(parts) or "here"
+
+
+def _candidate(obs: Observation, targets: TargetMemory, here: TilePos, goal_type: str, kind: str, name: str,
+               col: int, row: int, predicate: str, description: str) -> GoalCandidate:
+    cid = f"{goal_type}:{name}" if goal_type in ("explore", "recover") else f"{goal_type}:{name}:c{col}:r{row}"
+    constraints = []
+    if goal_type in ("collect", "reach") and targets.hazard_near(col, row):
+        constraints.append("hazard_near_target")
+    if not obs.region.contains(TilePos(col=col, row=row)):
+        constraints.append("target_out_of_view")
+    return GoalCandidate(candidate_id=cid, goal_type=goal_type, target_kind=kind, target_name=name,
+                         target=TilePos(col=col, row=row),
+                         description=f"{description} at tile ({col},{row}); {_direction(here, col, row)}",
+                         success_predicate=predicate, constraints=tuple(constraints))
+
+
+def goal_candidates(obs: Observation, targets: TargetMemory, cfg: PlanningConfig,
+                    recover_tile: TilePos | None = None) -> tuple[GoalCandidate, ...]:
+    """Deterministic candidate goals from observed facts, ordered by the fixed priority."""
+    if obs.player_position is None:
+        return ()
+    here = player_tile(obs.player_position)
+    held = held_items(obs.inventory)
+    found: list[GoalCandidate] = []
+    for t in targets.present({"exit"}):
+        if "trophy" in held:  # verified rule: the door only works while holding the trophy
+            found.append(_candidate(obs, targets, here, "reach", "exit", t.name, t.col, t.row, "level_complete",
+                                    f"Go through the {t.name} (trophy held)"))
+    for t in targets.present({"required_item", "item"}):
+        found.append(_candidate(obs, targets, here, "collect", t.kind, t.name, t.col, t.row, "item_collected_at",
+                                f"Collect the {t.name}"))
+    loot = sorted(targets.present({"collectible"}),
+                  key=lambda t: (abs(t.col - here.col) + abs(t.row - here.row), t.col, t.row))
+    for t in loot[:cfg.nearest_collectibles]:
+        found.append(_candidate(obs, targets, here, "collect", t.kind, t.name, t.col, t.row, "item_collected_at",
+                                f"Collect {t.name} (score only)"))
+    lo, hi = targets.seen_cols or (obs.region.min.col, obs.region.max.col)
+    found.append(_candidate(obs, targets, here, "explore", "explore", "right", hi + 1, here.row, "area_discovered",
+                            "Explore right to reveal map columns beyond those seen"))
+    if lo > 0:
+        found.append(_candidate(obs, targets, here, "explore", "explore", "left", lo - 1, here.row,
+                                "area_discovered", "Explore left to reveal map columns beyond those seen"))
+    if recover_tile is not None and recover_tile != here:
+        found.append(_candidate(obs, targets, here, "recover", "recover", "safe", recover_tile.col, recover_tile.row,
+                                "standing_at", "Return to the last tile where a skill ended safely"))
+    return tuple(sorted(found, key=priority))  # stable: loot stays nearest-first
+
+
+def recover_tile(memory: WorkingMemory) -> TilePos | None:
+    """The end tile of the latest completed skill that left Dave standing."""
+    for entry in reversed(memory.history):
+        if entry.outcome == "completed" and entry.end_state in STANDING_STATES and entry.end_tile is not None:
+            return entry.end_tile
+    return None
+
+
+# -- lifecycle ---------------------------------------------------------------------------
+def evaluate(goal: Goal, level_id: str, obs: Observation, events: list[Event],
+             targets: TargetMemory) -> tuple[str, str] | None:
+    """(status, reason) when the goal has ended, else None. Status: achieved | failed | expired."""
+    tile = _goal_tile(goal)
+    if obs.level_id != level_id:
+        return "failed", "level_changed"
+    types = [e.event_type for e in events]
+    if goal.success_predicate == "level_complete" and "level_complete" in types:
+        return "achieved", "level_complete"
+    if goal.success_predicate == "item_collected_at":
+        if any(e.event_type == "item_collected" and e.location == tile for e in events):
+            return "achieved", "item_collected"
+        known = [t for (c, r, _), t in targets.targets.items() if (c, r) == (tile.col, tile.row)]
+        if known and not any(t.present for t in known):
+            return "failed", "target_invalid"
+    if goal.success_predicate == "area_discovered":
+        right = goal.target_ref == "explore:right"
+        for e in events:
+            if e.event_type == "area_discovered" and e.payload.get("level_id") == level_id:
+                if (right and e.payload["max_col"] >= tile.col) or (not right and e.payload["min_col"] <= tile.col):
+                    return "achieved", "area_discovered"
+    if goal.success_predicate == "standing_at" and obs.player_position is not None:
+        here = player_tile(obs.player_position)
+        if obs.player_state in STANDING_STATES and here.row == tile.row and abs(here.col - tile.col) <= 1:
+            return "achieved", "standing_at_target"
+    if obs.terminal == "running" and goal.deadline_frame is not None and obs.frame >= goal.deadline_frame:
+        return "expired", "deadline"
+    return None
+
+
+def _goal_tile(goal: Goal) -> TilePos:
+    """The goal's final target tile, kept in its ``target:col,row`` constraint (graph arms move
+    ``next_waypoint`` along the route, so the waypoint is not the target)."""
+    for c in goal.constraints:
+        if c.startswith("target:"):
+            col, row = c[len("target:"):].split(",")
+            return TilePos(col=int(col), row=int(row))
+    raise ValueError(f"goal {goal.goal_id} has no target constraint")
+
+
+# -- planning records ----------------------------------------------------------------------
+@dataclass
+class PlanningRecord:
+    """One planning episode at a decision boundary (a planner call or a fallback)."""
+
+    frame: int
+    observation_id: int
+    triggers: tuple[str, ...]
+    request: PlanningRequest
+    chosen: str
+    fallback: bool
+    fallback_reason: str | None
+    attempts: int
+    errors: list[str]
+    goal_id: str
+    route: dict[str, Any] | None
+    route_ms: float
+    model_ms: float
+
+
+@dataclass
+class PlanningStep:
+    events: list[Event] = field(default_factory=list)
+    calls: list[ModelCallRecord] = field(default_factory=list)
+    record: PlanningRecord | None = None
+
+
+def _route_summary(route: Route, graph: WorldGraph) -> dict[str, Any]:
+    summary: dict[str, Any] = {"status": route.status}
+    if route.status == "found":
+        summary.update(steps=len(route.steps), cost=round(route.cost or 0.0, 3),
+                       skills=[s.skill for s in route.steps][:5])
+    elif route.status == "unreachable":
+        summary.update(reason=route.reason, frontier=list(route.frontier[:3]))
+    return summary
+
+
+class GoalManager:
+    def __init__(self, planner: StrategicPlanner, planning: PlanningConfig, max_retries: int,
+                 graph: WorldGraph | None = None, graph_cfg: GraphConfig | None = None) -> None:
+        if (graph is None) != (graph_cfg is None):
+            raise ValueError("graph and graph_cfg go together")
+        self.planner, self.cfg, self.max_retries = planner, planning, max_retries
+        self.graph, self.graph_cfg = graph, graph_cfg
+        self.targets = TargetMemory()
+        self._reset_state()
+
+    def _reset_state(self) -> None:
+        self.goal: Goal | None = None
+        self.status = "absent"
+        self.level_id: str | None = None
+        self.calls = 0
+        self.seq = 0
+        self.last_call_frame: int | None = None
+        self.previous: dict[str, Any] | None = None
+        self._pending: set[str] = set()
+        self._failures = 0
+        self._held: frozenset[str] = frozenset()
+        self._tracker: RouteTracker | None = None
+        self._goal_start = 0
+
+    # -- observation feed ------------------------------------------------------------------
+    def reset(self, obs: Observation, memory: WorkingMemory) -> PlanningStep:
+        self._reset_state()
+        self.targets.reset(obs)
+        self.level_id = obs.level_id
+        self._held = held_items(obs.inventory)
+        self._pending.add("no_goal")
+        return self._maybe_plan(obs, memory)
+
+    def observe(self, obs: Observation) -> None:
+        self.targets.observe(obs)
+
+    def update(self, obs: Observation, memory: WorkingMemory, events: list[Event],
+               run: ExecutionResult | None = None) -> PlanningStep:
+        """After each executed skill: end the goal if due, collect triggers, maybe plan."""
+        step = PlanningStep()
+        if self.goal is not None:
+            ended = evaluate(self.goal, self.level_id or obs.level_id, obs, events, self.targets)
+            if ended is not None:
+                step.events.append(self._end(obs, *ended))
+                memory.set_goal(None)
+        if obs.level_id != self.level_id:
+            self.level_id = obs.level_id
+            self._pending.add("no_goal")
+        if any(e.event_type == "death" for e in events):
+            self._pending.add("death")
+        held = held_items(obs.inventory)
+        if held != self._held:
+            self._held = held
+            self._pending.add("inventory_changed")
+        if run is not None:
+            self._failures = self._failures + 1 if run.outcome in FAILED_OUTCOMES else 0
+        if self.goal is not None and self.graph is not None:
+            self._follow_route(obs, memory, run)
+        planned = self._maybe_plan(obs, memory)
+        planned.events[:0] = step.events
+        return planned
+
+    # -- lifecycle -------------------------------------------------------------------------
+    def _end(self, obs: Observation, status: str, reason: str) -> Event:
+        goal = self.goal
+        assert goal is not None
+        self.status = status
+        self.previous = {"target_ref": goal.target_ref, "status": status, "reason": reason,
+                         "frames_active": obs.frame - self._goal_start}
+        self.goal, self._tracker = None, None
+        self._pending.add(f"goal_{status}")
+        event_type = "goal_achieved" if status == "achieved" else "goal_failed"
+        return Event(event_type=event_type, episode_id=obs.episode_id, frame=obs.frame, location=_goal_tile(goal),
+                     entity_refs=(goal.goal_id,), certainty="derived",
+                     payload={"goal_id": goal.goal_id, "target_ref": goal.target_ref, "status": status,
+                              "reason": reason})
+
+    def _triggers(self, memory: WorkingMemory) -> set[str]:
+        triggers = set(self._pending)
+        if self.goal is None and not triggers & HARD_TRIGGERS:
+            triggers.add("no_goal")
+        progress = memory.progress()
+        if progress.stuck:
+            triggers.add("stuck")
+        if self._failures >= self.cfg.repeated_skill_failures:
+            triggers.add("repeated_failures")
+        return triggers
+
+    def _maybe_plan(self, obs: Observation, memory: WorkingMemory) -> PlanningStep:
+        step = PlanningStep()
+        triggers = self._triggers(memory)
+        if not triggers or obs.terminal != "running" or obs.player_state in NO_PLANNING_STATES:
+            return step  # latched triggers wait (e.g. until respawn)
+        hard = triggers & HARD_TRIGGERS
+        if not hard and self.last_call_frame is not None and \
+                obs.frame - self.last_call_frame < self.cfg.min_frames_between_calls:
+            return step  # debounced soft trigger; it stays latched or is re-evaluated next time
+        candidates = goal_candidates(obs, self.targets, self.cfg,
+                                     recover_tile(memory) if triggers & {"death", "stuck", "repeated_failures",
+                                                                         "goal_failed", "goal_expired"} else None)
+        if not candidates:
+            return step
+        route_ms = 0.0  # Python route search, timed separately from model latency (graph arms only)
+        if self.graph is not None:
+            t0 = time.perf_counter()
+            candidates = tuple(c.model_copy(update={"route": _route_summary(self._route(obs, c), self.graph)})
+                               for c in candidates)
+            route_ms = (time.perf_counter() - t0) * 1000
+        request = self._request(obs, memory, tuple(sorted(triggers)), candidates)
+
+        chosen, fallback_reason, errors, attempts, model_ms = None, None, [], 0, 0.0
+        if self.calls >= self.cfg.max_calls_per_episode:
+            fallback_reason = "call_cap"
+        else:
+            feedback = None
+            while attempts <= self.max_retries and self.calls < self.cfg.max_calls_per_episode:
+                attempts += 1
+                self.calls += 1
+                text, call = self.planner.propose(request, feedback)
+                model_ms += call.latency_ms or 0.0
+                if call.status == "ok":
+                    try:
+                        choice = parse_plan(text, request.candidate_ids)
+                    except PlanOutputError as exc:
+                        call = call.model_copy(update={"status": "invalid_output"})
+                        feedback = str(exc)
+                        errors.append(feedback)
+                    else:
+                        chosen = (next(c for c in candidates if c.candidate_id == choice.goal), choice.rationale)
+                else:
+                    errors.append(f"call {call.status}")
+                    feedback = None
+                step.calls.append(call)
+                if call.status != "ok":
+                    step.events.append(Event(event_type="model_failure", episode_id=obs.episode_id,
+                                             frame=obs.frame, payload={"provider": call.provider,
+                                                                       "model": call.model, "purpose": "planner",
+                                                                       "status": call.status}))
+                if chosen is not None:
+                    break
+            self.last_call_frame = obs.frame
+            if chosen is None:
+                fallback_reason = "planner_failed" if errors else "call_cap"
+        if chosen is None:
+            if self.goal is not None and not hard:
+                self._pending.clear()  # keep the still-valid goal; nothing to replace it with
+                self._failures = 0
+                return step
+            avoid = self.previous["target_ref"] if self.previous and self.previous["status"] != "achieved" else None
+            pick = rule_choice(candidates, avoid)
+            chosen = (pick, f"deterministic fallback ({fallback_reason})")
+
+        candidate, rationale = chosen
+        t1 = time.perf_counter()
+        goal, route = self._activate(obs, memory, candidate, rationale)
+        if self.graph is not None:
+            route_ms += (time.perf_counter() - t1) * 1000
+        record = PlanningRecord(frame=obs.frame, observation_id=obs.observation_id, triggers=request.triggers,
+                                request=request, chosen=candidate.candidate_id, fallback=fallback_reason is not None,
+                                fallback_reason=fallback_reason, attempts=attempts, errors=errors,
+                                goal_id=goal.goal_id, route=route, route_ms=round(route_ms, 3),
+                                model_ms=round(model_ms, 1))
+        step.record = record
+        step.events.append(Event(
+            event_type="goal_set", episode_id=obs.episode_id, frame=obs.frame, location=candidate.target,
+            entity_refs=(goal.goal_id,), certainty="derived",
+            payload={"goal_id": goal.goal_id, "target_ref": goal.target_ref, "goal_type": goal.goal_type,
+                     "triggers": list(record.triggers), "fallback": record.fallback,
+                     "fallback_reason": fallback_reason, "attempts": attempts, "rationale": goal.rationale,
+                     "waypoint": goal.next_waypoint.model_dump() if goal.next_waypoint else None,
+                     "route": route, "route_ms": record.route_ms, "model_ms": record.model_ms,
+                     "candidates": list(request.candidate_ids)}))
+        return step
+
+    def _activate(self, obs: Observation, memory: WorkingMemory, candidate: GoalCandidate,
+                  rationale: str) -> tuple[Goal, dict[str, Any] | None]:
+        self.seq += 1
+        self.status = "planned"
+        goal = Goal(goal_id=f"g{self.seq}", goal_type=candidate.goal_type, target_ref=candidate.candidate_id,
+                    next_waypoint=candidate.target, success_predicate=candidate.success_predicate,
+                    constraints=(f"target:{candidate.target.col},{candidate.target.row}", *candidate.constraints),
+                    deadline_frame=obs.frame + self.cfg.goal_timeout_frames, rationale=rationale[:500],
+                    source_observation_id=obs.observation_id)
+        route = None
+        if self.graph is not None:
+            planned = self._route(obs, candidate)
+            route = _route_summary(planned, self.graph)
+            self._tracker = RouteTracker(planned, self.graph, obs.inventory)
+            goal = goal.model_copy(update={"next_waypoint": self._waypoint(planned, goal)})
+        self.goal, self.status, self._goal_start = goal, "active", obs.frame
+        memory.set_goal(goal)
+        self._pending.clear()
+        self._failures = 0
+        return goal, route
+
+    # -- learned routes (graph-enabled arms only) -------------------------------------------
+    def _target_node(self, obs: Observation, candidate: GoalCandidate, start: str | None) -> str | None:
+        graph = self.graph
+        assert graph is not None
+        if candidate.goal_type != "explore":
+            return graph.node_at(obs.level_id, candidate.target.row, candidate.target.col)
+        # Explore: the cheapest reachable segment with an unexplored side in that direction.
+        side = "open_right" if candidate.target_name == "right" else "open_left"
+        options = sorted(n for n, d in graph.g.nodes(data=True) if d["level_id"] == obs.level_id and d[side])
+        if start is None or not options:
+            return options[0] if options else None
+        costed = []
+        for node in options:
+            route = find_route(graph, start, node, obs.inventory, self.graph_cfg)  # type: ignore[arg-type]
+            if route.status in ("found", "at_target"):
+                costed.append((route.cost or 0.0, node))
+        return min(costed)[1] if costed else options[0]
+
+    def _route(self, obs: Observation, candidate: GoalCandidate) -> Route:
+        graph = self.graph
+        assert graph is not None and self.graph_cfg is not None
+        start = graph.locate(obs)
+        target = self._target_node(obs, candidate, start)
+        if start is None:
+            return Route("unreachable", "", target or "", reason="unknown_start")
+        if target is None:
+            return Route("unreachable", start, "", reason="target_not_on_known_segment",
+                         frontier=find_route(graph, start, "", obs.inventory, self.graph_cfg).frontier)
+        return find_route(graph, start, target, obs.inventory, self.graph_cfg)
+
+    def _waypoint(self, route: Route, goal: Goal) -> TilePos:
+        """The next route node's cell nearest the goal's target, or the target tile itself."""
+        final = _goal_tile(goal)
+        step = self._tracker.next_step if self._tracker else None
+        if route.status != "found" or step is None or self.graph is None:
+            return final
+        data = self.graph.g.nodes[self.graph.resolve(step.target)]
+        return TilePos(col=min(max(final.col, data["col_min"]), data["col_max"]), row=data["row"])
+
+    def _follow_route(self, obs: Observation, memory: WorkingMemory, run: ExecutionResult | None) -> None:
+        """Route bookkeeping in Python; only a route lost after being found asks the planner."""
+        assert self.graph is not None and self.goal is not None and self._tracker is not None
+        node = self.graph.locate(obs)
+        failed = run is not None and run.outcome in FAILED_OUTCOMES
+        reason = self._tracker.update(self.graph, node, obs.inventory, step_failed=failed)
+        if reason is None:
+            waypoint = self._waypoint(self._tracker.route, self.goal)
+        elif reason == "target_reached":
+            waypoint = _goal_tile(self.goal)
+        elif node is None and reason != "inventory_changed" and not reason.startswith("no_route"):
+            return  # airborne: re-route once Dave is standing on a segment again
+        else:
+            had_route = self._tracker.route.status == "found"
+            candidate = GoalCandidate(candidate_id=self.goal.target_ref, goal_type=self.goal.goal_type,
+                                      target_kind="", target_name=self.goal.target_ref.split(":")[1],
+                                      target=_goal_tile(self.goal), description="",
+                                      success_predicate=self.goal.success_predicate)
+            route = self._route(obs, candidate)
+            self._tracker = RouteTracker(route, self.graph, obs.inventory)
+            if had_route and route.status == "unreachable":
+                self._pending.add("route_invalidated")
+            waypoint = self._waypoint(route, self.goal)
+        if waypoint != self.goal.next_waypoint:
+            self.goal = self.goal.model_copy(update={"next_waypoint": waypoint})
+            memory.set_goal(self.goal, restart_clock=False)
+
+    # -- request -----------------------------------------------------------------------------
+    def _request(self, obs: Observation, memory: WorkingMemory, triggers: tuple[str, ...],
+                 candidates: tuple[GoalCandidate, ...]) -> PlanningRequest:
+        here = player_tile(obs.player_position) if obs.player_position else None
+        nearby: list[dict[str, Any]] = []
+        if here is not None:
+            for t in obs.tiles:
+                if t.kind == "hazard" and abs(t.pos.col - here.col) <= NEARBY_TILES \
+                        and abs(t.pos.row - here.row) <= NEARBY_TILES:
+                    nearby.append({"type": t.name, "kind": "hazard_tile", "tile": [t.pos.col, t.pos.row]})
+            for e in obs.entities:
+                if e.visible:
+                    tile = player_tile(e.position)
+                    nearby.append({"type": e.entity_type, "kind": "entity", "tile": [tile.col, tile.row]})
+        recent = tuple(
+            {"skill": e.skill, "outcome": e.outcome, "reason": e.reason, "events": list(e.events),
+             "end_tile": [e.end_tile.col, e.end_tile.row] if e.end_tile else None}
+            for e in memory.history[-self.cfg.recent_events:]
+        )
+        return PlanningRequest(
+            episode_id=obs.episode_id, level_id=obs.level_id, frame=obs.frame, observation_id=obs.observation_id,
+            triggers=triggers,
+            player={"tile": [here.col, here.row] if here else None, "state": obs.player_state,
+                    "grounded": obs.grounded, "facing": obs.facing},
+            lives=obs.lives, inventory=obs.inventory, score=obs.score,
+            view_cols=(obs.region.min.col, obs.region.max.col), nearby=tuple(nearby[:MAX_NEARBY]),
+            recent=recent, previous_goal=self.previous,
+            current_goal=self.goal.target_ref if self.goal else None,
+            candidates=candidates, graph_routes=self.graph is not None,
+        )

@@ -1,15 +1,29 @@
 schema_version: 1
 scenario: fixture_l1          # dave scenarios: level1 .. level9
 memory:
-  recent_history_frames: 120
+  recent_history_frames: 120   # working-memory window in simulation frames
+  max_history_entries: 64      # hard cap on the recent-history deque
+  context_entries: 8           # recent entries shown to controllers
   episode_store: artifacts/events.sqlite
+  store_batch_size: 200        # rows buffered before one SQLite write
   graph_enabled: false
   graph_checkpoint: null
   graph_updates: true
+graph:
+  # Route cost = time*frames/reference_frames + risk*-log(clip(p)) + uncertainty/(attempts+1)
+  weights: {time: 1.0, risk: 1.0, uncertainty: 0.5}
+  reference_frames: 100
+  p_min: 0.05
+  p_max: 0.99
+  evidence_per_item: 20        # evidence ids kept per node/edge (the count is always kept)
 planning:
   no_progress_frames: 180
   repeated_skill_failures: 3
   max_calls_per_episode: 30
+  min_frames_between_calls: 60   # debounce for soft triggers (death, stuck, failures, inventory)
+  goal_timeout_frames: 480       # goal expiry; fixture scale, tune for Dave
+  recent_events: 8               # recent skills shown to the planner
+  nearest_collectibles: 3        # loot/gems offered as collect goals (trophy and items always)
 benchmark:
   pilot_trials: 5
   initial_trials: 30

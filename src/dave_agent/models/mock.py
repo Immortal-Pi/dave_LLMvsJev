@@ -1,7 +1,8 @@
-"""Offline mock controller: seeded uniform choice over the offered candidates."""
+"""Offline mock controller: seeded uniform choice over the offered candidates (ignores memory)."""
 
 import random
 
+from dave_agent.memory.working import MemoryContext
 from dave_agent.schemas import Decision, Goal, ModelCallRecord, Observation, SkillCandidate
 
 
@@ -12,7 +13,11 @@ class SeededMockController:
         self._rng = random.Random(seed)
 
     def decide(
-        self, observation: Observation, goal: Goal | None, candidates: list[SkillCandidate]
+        self,
+        observation: Observation,
+        goal: Goal | None,
+        candidates: list[SkillCandidate],
+        memory: MemoryContext,
     ) -> tuple[Decision, ModelCallRecord]:
         if not candidates:
             raise ValueError("no candidates offered")

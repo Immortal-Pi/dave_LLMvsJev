@@ -24,7 +24,14 @@
 | `uv run pytest` | Offline test suite; no credentials needed |
 | `uv run pytest tests/unit/test_fixture_adapter.py::test_snapshot_round_trip` | Run a single test |
 | `uv run dave-agent probe --adapter fixture` | reset → step → changed observation |
-| `uv run dave-agent play --arm A --mock` | One offline fixture episode for an arm |
+| `uv run dave-agent play --arm A --mock` | One offline fixture episode for an arm, logged to `artifacts/events.sqlite` (`--store`, `--run-id`) |
+| `uv run dave-agent export --run-id RUN --out FILE.jsonl` | Export the episode store, or one run, as JSONL |
+| `uv run dave-agent replay --jsonl FILE.jsonl` | Re-run exported episodes and verify the recorded evidence |
+| `uv run dave-agent play --arm C --mock [--graph PATH]` | Graph-enabled arm: learns into `artifacts/graphs/arm-C/<adapter>.json` |
+| `uv run dave-agent play --arm A --mock --planner live [--adapter dave --scenario level1]` | **Live, paid**: Azure OpenAI strategic planner with the mock tactical controller (run mode `live-planner`) |
+| `uv run dave-agent probe-provider --provider azure` | **Live, paid**: one planner call; prints status, latency, usage and the validated choice |
+| `uv run python scripts/probe_azure.py` | **Live, paid**: one planner call; refreshes `tests/fixtures/azure/planner_response.json` |
+| `uv run dave-agent graph --checkpoint PATH [--yaml OUT] [--route FROM TO --items trophy]` | Inspect a graph checkpoint, export YAML, search a route |
 | `scripts\setup_dave.bat` | Clone, patch and build deadly-dave plus the bridge (needs git and VS Build Tools 2022) |
 | `uv run python scripts/probe_environment.py` | Real-game acceptance checks; screenshots go to `artifacts/probe/` |
 | `uv run python scripts/calibrate_skills.py` | Real-game skill calibration; checks the measurements against `configs/skills.yaml` and saves `artifacts/calibration/skills.json` |
@@ -48,6 +55,10 @@ uv run python scripts/probe_environment.py --watch
 ## Configuration
 
 - `configs/skills.yaml` holds one skill catalog per adapter (`skills.catalogs.fixture` and `.dave`) plus executor settings. Re-run the calibration script after changing Dave durations.
+- `graph:` in `configs/experiments.yaml` sets the route-cost weights and limits (see `docs/graph.md`).
+- `planning:` sets the planner triggers, debounce, call cap, goal timeout and planner context size (see `docs/planner.md`).
+- Live tests are marked `live` and skip unless `RUN_LIVE=1` (e.g. `RUN_LIVE=1 uv run pytest -m live`).
+- `memory.*` in `configs/experiments.yaml` sets the working-memory limits and the episode store path and batch size (see `docs/memory.md`).
 - `configs/experiments.yaml` is the entry point. Its sibling files `environment.yaml`, `models.yaml` and `skills.yaml` are merged in, and each top-level key may appear in only one file.
 - Secrets live in `.env`; `.env.example` lists the variable names.
 

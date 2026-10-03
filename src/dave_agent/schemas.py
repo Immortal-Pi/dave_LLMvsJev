@@ -201,6 +201,13 @@ EventType = Literal[
     "game_over",
     "episode_truncated",
     "model_failure",
+    # Derived by memory/detector.py from consecutive observations.
+    "inventory_changed",
+    "area_discovered",
+    # Emitted by the goal manager (Phase 6).
+    "goal_set",
+    "goal_achieved",
+    "goal_failed",
 ]
 
 

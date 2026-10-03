@@ -128,17 +128,58 @@ class SkillsConfig(Strict):
 
 
 class MemoryConfig(Strict):
+    # Working memory: the recent-history deque covers this many simulation frames and never
+    # holds more than max_history_entries; controllers see at most context_entries of it.
     recent_history_frames: PositiveInt
+    max_history_entries: PositiveInt
+    context_entries: PositiveInt
     episode_store: Path
+    store_batch_size: PositiveInt  # rows buffered before one SQLite transaction
     graph_enabled: bool
     graph_checkpoint: Path | None
     graph_updates: bool
 
+    @model_validator(mode="after")
+    def _context_fits(self) -> MemoryConfig:
+        if self.context_entries > self.max_history_entries:
+            raise ValueError("context_entries must not exceed max_history_entries")
+        return self
+
+
+class RouteWeights(Strict):
+    time: Annotated[float, Field(ge=0)]
+    risk: Annotated[float, Field(ge=0)]
+    uncertainty: Annotated[float, Field(ge=0)]
+
+
+class GraphConfig(Strict):
+    """Learned-graph route cost (docs/graph.md). Starting points, not calibrated values."""
+
+    weights: RouteWeights
+    reference_frames: PositiveInt
+    p_min: Annotated[float, Field(gt=0, lt=1)]
+    p_max: Annotated[float, Field(gt=0, lt=1)]
+    evidence_per_item: PositiveInt
+
+    @model_validator(mode="after")
+    def _clip_ordered(self) -> GraphConfig:
+        if self.p_min >= self.p_max:
+            raise ValueError("p_min must be below p_max")
+        return self
+
 
 class PlanningConfig(Strict):
+    """Goal manager and planner triggers (docs/planner.md). Starting points, not calibrated values."""
+
     no_progress_frames: PositiveInt
     repeated_skill_failures: PositiveInt
     max_calls_per_episode: PositiveInt
+    # Soft triggers (death, stuck, repeated failures, inventory, invalid target or route) wait at
+    # least this many frames after the previous planner call. Goal-ended triggers do not.
+    min_frames_between_calls: Annotated[int, Field(ge=0)]
+    goal_timeout_frames: PositiveInt  # a goal not achieved by then expires
+    recent_events: PositiveInt  # recent history entries shown to the planner
+    nearest_collectibles: Annotated[int, Field(ge=0)]  # score items offered as collect goals
 
 
 class BenchmarkConfig(Strict):
@@ -163,6 +204,7 @@ class AppConfig(Strict):
     models: ModelsConfig
     skills: SkillsConfig
     memory: MemoryConfig
+    graph: GraphConfig
     planning: PlanningConfig
     benchmark: BenchmarkConfig
     arms: dict[str, ArmConfig]
@@ -232,4 +274,12 @@ def load_config(experiments_path: Path | str) -> AppConfig:
             if not getattr(env, name).is_absolute()
         }
     )
-    return config.model_copy(update={"environment": env})
+    memory = config.memory
+    memory = memory.model_copy(
+        update={
+            name: project_root / getattr(memory, name)
+            for name in ("episode_store", "graph_checkpoint")
+            if getattr(memory, name) is not None and not getattr(memory, name).is_absolute()
+        }
+    )
+    return config.model_copy(update={"environment": env, "memory": memory})

@@ -1,9 +1,12 @@
-"""Single-episode control loop: observe -> candidates -> decide -> revalidate -> execute.
+"""Single-episode control loop: observe -> remember -> candidates -> decide -> revalidate -> execute.
 
-Phase 1 runs without a planner or memory; those attach in Phases 4-6 without changing
-this loop's observation/candidate/executor path, which every arm shares. Execution is
-paused-step: the game advances only inside ``execute``, so it is frozen while a
-controller decides.
+Every arm shares this loop's observation, working-memory, candidate and executor path. Execution
+is paused-step: the game advances only inside ``execute``, so it is frozen while a planner or
+controller decides. The optional recorder is write-only, so episode logging never feeds back
+into decisions. The optional learned graph (graph-enabled arms only) is updated from the same
+observations. The optional goal manager runs at decision boundaries: after the episode starts
+and after each skill it ends goals that are due and calls the planner on shared triggers; on
+graph-enabled arms it also turns the goal into a route waypoint (control/goals.py).
 """
 
 from __future__ import annotations
@@ -13,7 +16,12 @@ from dataclasses import dataclass, field
 
 from dave_agent.adapters.base import GameAdapter
 from dave_agent.config import ExecutorConfig, SkillSpec
+from dave_agent.control.goals import GoalManager, PlanningRecord, PlanningStep
 from dave_agent.control.skills import ExecutionResult, execute, generate_candidates
+from dave_agent.memory.detector import EventDetector
+from dave_agent.memory.episodes import EpisodeRecorder
+from dave_agent.memory.graph import WorldGraph
+from dave_agent.memory.working import WorkingMemory
 from dave_agent.models.base import TacticalController
 from dave_agent.schemas import Decision, Event, ModelCallRecord, validate_decision
 
@@ -35,7 +43,8 @@ class CandidateRecord:
 class EpisodeResult:
     episode_id: str
     adapter: str
-    outcome: str  # level_complete | game_over | secret_exit | truncated
+    outcome: str  # level_complete | game_over | secret_exit | truncated | error
+    termination_reason: str
     frames: int
     score: int | None
     lives: int | None
@@ -45,6 +54,7 @@ class EpisodeResult:
     observation_ids: list[int] = field(default_factory=list)
     candidate_sets: list[CandidateRecord] = field(default_factory=list)
     executions: list[ExecutionResult] = field(default_factory=list)
+    planning: list[PlanningRecord] = field(default_factory=list)
 
 
 def run_episode(
@@ -52,60 +62,116 @@ def run_episode(
     controller: TacticalController,
     skills: tuple[SkillSpec, ...],
     executor: ExecutorConfig,
+    memory: WorkingMemory,
     scenario_id: str,
     seed: int,
     max_frames: int,
+    recorder: EpisodeRecorder | None = None,
+    graph: WorldGraph | None = None,
+    goals: GoalManager | None = None,
 ) -> EpisodeResult:
     observation = adapter.reset(scenario_id, seed)
+    memory.reset(observation)
+    if graph is not None:
+        graph.observe(observation)
+    detector = EventDetector()
     buttons = adapter.capabilities().buttons
     result = EpisodeResult(
         episode_id=observation.episode_id,
         adapter=observation.adapter,
         outcome="truncated",
+        termination_reason="",
         frames=0,
         score=observation.score,
         lives=observation.lives,
     )
-    result.events.append(
-        Event(event_type="episode_start", episode_id=observation.episode_id, frame=observation.frame)
-    )
+    start_events = [Event(event_type="episode_start", episode_id=observation.episode_id, frame=observation.frame,
+                          payload={"scenario_id": scenario_id, "seed": seed}),
+                    *detector.reset(observation)]
+    result.events.extend(start_events)
     result.observation_ids.append(observation.observation_id)
+    if recorder is not None:
+        recorder.start(observation, start_events)
 
-    while observation.terminal == "running" and observation.frame < max_frames:
-        offered = generate_candidates(skills, buttons, observation)
-        if not offered.candidates:
-            raise RuntimeError(f"no legal candidates at frame {observation.frame}: {offered.masked}")
-        result.candidate_sets.append(
-            CandidateRecord(observation.observation_id, observation.frame, offered.ids, offered.masked, offered.digest())
-        )
-        candidates = list(offered.candidates)
-        if len(candidates) == 1:
-            # Only one legal action (e.g. waiting out a burn): no model call, same for every arm.
-            decision = Decision(
-                candidate_id=candidates[0].candidate_id, observation_id=observation.observation_id, forced=True
+    def planned(step: PlanningStep) -> None:
+        result.model_calls.extend(step.calls)
+        result.events.extend(step.events)
+        if step.record is not None:
+            result.planning.append(step.record)
+        if recorder is not None and (step.calls or step.events):
+            recorder.record_planning(step.calls, step.events)
+
+    try:
+        if goals is not None:
+            planned(goals.reset(observation, memory))
+        while observation.terminal == "running" and observation.frame < max_frames:
+            offered = generate_candidates(skills, buttons, observation)
+            if not offered.candidates:
+                raise RuntimeError(f"no legal candidates at frame {observation.frame}: {offered.masked}")
+            result.candidate_sets.append(
+                CandidateRecord(observation.observation_id, observation.frame, offered.ids, offered.masked,
+                                offered.digest())
             )
-        else:
-            decision, call = controller.decide(observation, None, candidates)
-            result.model_calls.append(call)
-        candidate = validate_decision(decision, candidates, observation)
-        result.decisions.append(decision)
-        run = execute(adapter, candidate, skills, observation, executor)
-        result.executions.append(run)
-        result.events.extend(run.events)
-        if run.outcome == "rejected":
-            # Candidates were generated from this observation, so this indicates a bug.
-            raise RuntimeError(f"candidate {candidate.candidate_id} rejected on its own observation: {run.reason}")
-        observation = run.observation
-        result.observation_ids.append(observation.observation_id)
-        log.debug("frame=%d skill=%s outcome=%s reason=%s", observation.frame, run.skill, run.outcome, run.reason)
+            candidates = list(offered.candidates)
+            call = None
+            events: list[Event] = []
+            if len(candidates) == 1:
+                # Only one legal action (e.g. waiting out a burn): no model call, same for every arm.
+                decision = Decision(
+                    candidate_id=candidates[0].candidate_id, observation_id=observation.observation_id, forced=True
+                )
+            else:
+                decision, call = controller.decide(observation, memory.goal, candidates, memory.context())
+                result.model_calls.append(call)
+                if call.status != "ok":
+                    events.append(Event(event_type="model_failure", episode_id=observation.episode_id,
+                                        frame=observation.frame,
+                                        payload={"provider": call.provider, "model": call.model,
+                                                 "purpose": call.purpose, "status": call.status}))
+            candidate = validate_decision(decision, candidates, observation)
+            result.decisions.append(decision)
+            run = execute(adapter, candidate, skills, observation, executor)
+            if run.outcome == "rejected":
+                # Candidates were generated from this observation, so this indicates a bug.
+                raise RuntimeError(f"candidate {candidate.candidate_id} rejected on its own observation: {run.reason}")
+            events.extend(run.events)
+            for step in run.steps:
+                events.extend(detector.observe(step.observation))
+                if graph is not None:
+                    graph.observe(step.observation)
+                if goals is not None:
+                    goals.observe(step.observation)
+            if graph is not None:
+                ref = f"{recorder.episode_key if recorder else observation.episode_id}#{observation.observation_id}"
+                graph.record_execution(observation, run, ref)
+            result.executions.append(run)
+            result.events.extend(events)
+            memory.record(decision, run)
+            if recorder is not None:
+                recorder.record(observation, offered, decision, call, run, events)
+            observation = run.observation
+            result.observation_ids.append(observation.observation_id)
+            if goals is not None:
+                planned(goals.update(observation, memory, events, run))
+            log.debug("frame=%d skill=%s outcome=%s reason=%s", observation.frame, run.skill, run.outcome, run.reason)
+    except Exception as exc:
+        result.outcome, result.termination_reason = "error", f"error:{type(exc).__name__}: {exc}"
+        if recorder is not None:
+            recorder.finish(result.outcome, result.termination_reason, observation, [])
+        raise
 
+    end_events: list[Event] = []
     if observation.terminal == "running":
-        result.events.append(
-            Event(event_type="episode_truncated", episode_id=observation.episode_id, frame=observation.frame)
-        )
+        result.termination_reason = f"max_frames:{max_frames}"
+        end_events.append(Event(event_type="episode_truncated", episode_id=observation.episode_id,
+                                frame=observation.frame, payload={"max_frames": max_frames}))
     else:
         result.outcome = observation.terminal
+        result.termination_reason = f"terminal:{observation.terminal}"
+    result.events.extend(end_events)
     result.frames = observation.frame
     result.score = observation.score
     result.lives = observation.lives
+    if recorder is not None:
+        recorder.finish(result.outcome, result.termination_reason, observation, end_events)
     return result
