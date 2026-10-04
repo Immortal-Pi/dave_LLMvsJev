@@ -178,14 +178,22 @@ class Decision(Contract):
     goal_id: Identifier | None = None
     provider_score: float | None = None
     provider_score_meaning: str | None = None
+    # fallback: no valid model answer (or a budget ran out), so the deterministic legal fallback
+    # chose; never counted as a model decision. fallback_reason says why.
     fallback: bool = False
+    fallback_reason: str | None = Field(default=None, max_length=128)
     # forced: exactly one legal candidate, so the runner chose it without a model call.
     forced: bool = False
+    # sha256 prefix of the shared tactical request (models/tactical.py::context_digest): equal
+    # digests mean two arms were shown identical context. None for forced decisions.
+    context_digest: str | None = Field(default=None, max_length=64)
 
     @model_validator(mode="after")
     def _score_documented(self) -> Decision:
         if self.provider_score is not None and not self.provider_score_meaning:
             raise ValueError("provider_score requires provider_score_meaning describing its semantics")
+        if self.fallback_reason is not None and not self.fallback:
+            raise ValueError("fallback_reason is only set on fallback decisions")
         return self
 
 
@@ -201,6 +209,8 @@ EventType = Literal[
     "game_over",
     "episode_truncated",
     "model_failure",
+    # A tactical decision made by the deterministic fallback (payload: reason, candidate_id).
+    "decision_fallback",
     # Derived by memory/detector.py from consecutive observations.
     "inventory_changed",
     "area_discovered",
@@ -208,6 +218,8 @@ EventType = Literal[
     "goal_set",
     "goal_achieved",
     "goal_failed",
+    # Candidates removed by the threat check (control/threats.py; payload: masked {id: reason}).
+    "candidates_screened",
 ]
 
 
@@ -241,6 +253,9 @@ class ModelCallRecord(Contract):
     cost_source: Literal["provider_reported", "estimated"] | None = None
     request_ref: str | None = None
     response_ref: str | None = None
+    # Provider answer details kept as reported (e.g. Jev probabilities, confidence, dated model);
+    # None when the provider returns nothing beyond the answer text.
+    output: dict[str, Any] | None = None
 
     @model_validator(mode="after")
     def _cost_source(self) -> ModelCallRecord:

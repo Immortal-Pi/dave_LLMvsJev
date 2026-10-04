@@ -1,6 +1,8 @@
 """LLM and Jev arms receive exactly the same candidates, observations and working memory,
 and their episode logs are identical apart from arm and controller labels."""
 
+import re
+
 from dave_agent.adapters.fixture import FixtureAdapter
 from dave_agent.config import SkillSpec
 from dave_agent.memory.episodes import EpisodeStore
@@ -112,10 +114,10 @@ def test_llm_and_jev_arms_share_planner_requests_goals_and_inputs(config):
 
 
 def test_graph_arm_differs_only_by_routes_and_waypoint(config):
-    from dave_agent.memory.graph import WorldGraph
+    from dave_agent.memory.graph import GraphStore
 
     plain, plain_ctl, plain_plan = _planned(config, "m")
-    routed, routed_ctl, routed_plan = _planned(config, "m", WorldGraph("fixture", "fixture-platformer-v1",
+    routed, routed_ctl, routed_plan = _planned(config, "m", GraphStore("fixture", "fixture-platformer-v1",
                                                                        "local_observed"))
     strip = {"graph_routes": True, "candidates": {"__all__": {"route"}}}
     assert [r.model_dump(exclude=strip) for r in plain_plan.requests] == \
@@ -144,3 +146,58 @@ def test_graph_learning_alone_adds_no_controller_context(config):
     finally:
         adapter.close()
     assert graph.g.number_of_nodes() > 0 and plain.seen == learning.seen
+
+
+def test_context_digests_logged_and_identical_across_arms_a_b_c(config, tmp_path):
+    """Every arm's tactical model goes through ModelController, which logs a digest of the shared
+    request per decision: equal digests show A, B and C were shown identical context."""
+    from dave_agent.models.tactical import ModelController, SeededMockModel
+
+    digests = {}
+    for arm, label in (("A", "mock-llm"), ("B", "mock-jev"), ("C", "mock-jev")):
+        with EpisodeStore(tmp_path / f"{arm}.sqlite") as store:
+            store.create_run(f"run-{arm}", mode="mock", command="test", config_json="{}")
+            recorder = store.recorder(f"run-{arm}", arm, label, "fixture_l1", 3, 50)
+            controller = ModelController(SeededMockModel(seed=3, label=label), config.tactical,
+                                         config.models.max_retries)
+            _run(controller, config, 3, recorder)
+            rows = store.query("SELECT forced, context_digest FROM decisions ORDER BY seq")
+        assert rows and all((r["context_digest"] is None) == bool(r["forced"]) for r in rows)
+        digests[arm] = [r["context_digest"] for r in rows]
+    assert digests["A"] == digests["B"] == digests["C"]
+
+
+def test_only_graph_arms_see_past_run_notes(config):
+    """A graph trained on earlier episodes adds "past runs" notes to the candidates; removing them
+    leaves exactly what an arm without a graph sees. Within-episode notes are shared by all arms."""
+    from dave_agent.memory.graph import WorldGraph
+
+    trained = WorldGraph("fixture", "fixture-platformer-v1", "local_observed")
+    for seed in (1, 2, 3):
+        adapter = FixtureAdapter(LEVELS)
+        try:
+            run_episode(adapter, SeededMockController(seed=seed, label="m"), config.skills.for_adapter("fixture"),
+                        config.skills.executor, WorkingMemory.from_config(config), "fixture_l1", seed,
+                        max_frames=200, graph=trained)
+        finally:
+            adapter.close()
+    before = trained.counts()
+    plain = SpyController(SeededMockController(seed=3, label="m"))
+    noted = SpyController(SeededMockController(seed=3, label="m"))
+    _run(plain, config, 3)
+    adapter = FixtureAdapter(LEVELS)
+    try:
+        run_episode(adapter, noted, config.skills.for_adapter("fixture"), config.skills.executor,
+                    WorkingMemory.from_config(config), "fixture_l1", 3, max_frames=200, evidence=trained)
+    finally:
+        adapter.close()
+    assert trained.counts() == before  # read only
+    descriptions = [c["description"] for _, cands, _ in noted.seen for c in cands]
+    assert any("past runs from this platform" in d for d in descriptions)
+    assert any("this episode from here" in c["description"] for _, cands, _ in plain.seen for c in cands)
+
+    def without_past(seen):
+        return [(o, [{**c, "description": re.sub(r"(^|; )past runs from this platform: [^;]*", "",
+                                                 c["description"])} for c in cands], m)
+                for o, cands, m in seen]
+    assert without_past(noted.seen) == plain.seen

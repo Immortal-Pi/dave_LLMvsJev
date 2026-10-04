@@ -16,4 +16,6 @@ class TacticalController(Protocol):
         goal: Goal | None,
         candidates: list[SkillCandidate],
         memory: MemoryContext,
-    ) -> tuple[Decision, ModelCallRecord]: ...
+    ) -> tuple[Decision, tuple[ModelCallRecord, ...]]:
+        """One decision and every model call made for it (empty when no call was made)."""
+        ...

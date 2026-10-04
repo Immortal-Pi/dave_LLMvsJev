@@ -10,9 +10,11 @@ Spec: `implementation/` (phases 0–11). Status as of **2026-10-03**.
 | 3: Action catalog and deterministic execution | **Done**: calibrated on the real game |
 | 4: Working memory and event history | **Done** |
 | 5: Learned world graph and persistence | **Done** |
-| 6: Strategic planner and goal manager | **Done** offline. Live Azure planner verified (planner only; tactical still mock) |
-| 7: LLM tactical baseline | Next |
-| 8–11 | Not started |
+| 6: Strategic planner and goal manager | **Done** offline. Live Azure planner verified |
+| 7: LLM tactical baseline | **Done** offline. Live arm A smoke run on Dave level 1 (planner and tactical live) |
+| 8: Jev tactical controller and hybrid loop | **Done** offline. Live A/B/C smoke run on Dave level 1 (planner and tactical live) |
+| 9: Benchmark protocol and reproducible runner | **Done** offline (mock acceptance gate on the fixture, mock benchmarks on Dave). No paid benchmark run yet |
+| 10–11 | Not started |
 
 ## Phase 0: completed
 
@@ -141,12 +143,207 @@ Details are in `docs/planner.md`.
 - **Config:** `planning.min_frames_between_calls` (60), `goal_timeout_frames` (480), `recent_events` (8) and `nearest_collectibles` (3). These are not calibrated.
 - **New:** `scripts/probe_azure.py` and the fixture `tests/fixtures/azure/planner_response.json`.
 
+## Phase 7: completed
+
+Details are in `docs/tactical.md`.
+
+- **`models/tactical.py`:**
+  - `tactical_request`: the single request every tactical model sees (player, lives, inventory and score, the local view as a character grid, visible entities, the goal with waypoint and offset, progress, recent skills, candidates);
+  - `parse_tactical`: exactly `{"candidate_id": <offered id>}`;
+  - `ModelController`, the shared policy for every model-backed arm:
+    - one re-ask (`models.max_retries`), with feedback after invalid output;
+    - then the deterministic legal fallback (`tactical.fallback_skills`, else the first candidate), logged with `Decision.fallback`, `fallback_reason` and a `decision_fallback` event;
+    - per-episode call, token and cost budgets, checked before every call (`BudgetExhausted` with `on_budget_exhausted: terminate`, or fallback decisions);
+  - `SeededMockModel` (the offline default, the same choices as `SeededMockController`) and `ScriptedTacticalModel` (tests).
+- **`models/azure.py`:**
+  - `AzureTacticalModel`: strict schema with an enum of the offered ids, settings from `models.tactical_llm`;
+  - the verified rules text is shared with the planner (`GAME_RULES`); the planner's settings now come from `models.planner`.
+- **Runner:**
+  - `decide` returns every call made for the decision;
+  - `model_failure` per non-ok call;
+  - the wall-time budget (`benchmark.max_episode_wall_seconds`);
+  - budget stops end the episode as `truncated` with `budget:<name>`.
+- **Store:** `EpisodeRecorder.record` stores all calls for a decision, and `model_call_seq` points to the last one. Each run stores `effective_settings` in `runs.config_json`. No schema version change.
+- **Schema:** `Decision.fallback_reason`; event type `decision_fallback`.
+- **CLI:**
+  - `play --tactical mock|live`; `--mock` is now optional (the default) and conflicts only with `--tactical live`;
+  - live runs print their budget to stderr before any call; modes `live-tactical` and `live`;
+  - the summary adds `model_decisions`, `fallback_decisions`, `fallback_reasons`, `tactical_calls`, `tactical_failures`, `tactical_latency_ms`, `tokens`, `cost_usd` and `settings`;
+  - `probe-provider --purpose tactical`.
+- **Config:** a `tactical:` section (`max_calls_per_episode` 400, `max_tokens_per_episode` 1,000,000, `max_cost_usd_per_episode` null, `on_budget_exhausted: terminate`, `fallback_skills [wait_short, wait]`). `models.planner` and `models.tactical_llm` gained `max_completion_tokens` (2000) and `reasoning_effort` (low).
+
+## Phase 8: completed
+
+Details are in `docs/tactical.md` (Jev section).
+
+- **`models/jev.py`:** `JevSettings` (key from `models.jev.api_key_env`, checked before the game starts), `JevClient` (OpenRouter `alpha/decisions`; 529 retried too) and `JevTacticalModel`:
+  - `state` = arm A's user-message JSON plus the same rules and input guide that arm A gets in its system prompt;
+  - one `choice` question whose criteria are the offered candidate ids with their descriptions;
+  - `provider_score` = the chosen candidate's probability, with its meaning recorded;
+  - dated model, token usage and reported cost preserved; absent fields stay None.
+- **`models/http.py`:** the transport retry loop, now shared by Azure and Jev (the Azure behaviour is unchanged).
+- **`models/tactical.py`:** the provider-neutral text (`GAME_RULES`, `INPUT_GUIDE`, `TACTICAL_TASK`) moved here; the Azure prompts are byte-identical. `context_digest` is set on every model decision.
+- **Schema and store:**
+  - `Decision.context_digest` and `ModelCallRecord.output` (provider answer details);
+  - store schema **v2** (`decisions.context_digest`, `model_calls.output_json`). A v1 store (such as an existing `artifacts/events.sqlite`) is refused with the "export to JSONL and start a new store file" error.
+- **Hybrid loop (`control/goals.py`):** a `death` event now ends the active goal (`goal_failed`, reason `death`). The tactical model never chases the old waypoint while Dave burns, and the hard trigger replans at the respawn even inside the debounce window. Planning stays event-driven; the `play` summary adds `decisions_per_planning`.
+- **CLI:**
+  - `play --tactical live` for arms B and C (Jev); arm A keeps Azure;
+  - `probe-provider --provider jev [--save-fixture]`.
+- **Tests:**
+  - `test_jev_tactical.py` (11): payload parity with arm A, the sanitized live fixtures, None for absent fields, invalid choice → retry → fallback, 429/503/529 retries, timeout and 401 fallbacks without key leaks, missing key;
+  - an A/B/C `context_digest` parity test;
+  - the death/respawn goal test;
+  - the Jev CLI refusals.
+
+## Phase 9: completed (offline)
+
+Details are in `docs/benchmark.md`.
+
+- **`runner/session.py`:** the episode setup moved out of `cli.play` (`build_models`, `run_trial`, `episode_summary`). `play` output is unchanged.
+- **`runner/benchmark.py` `BenchmarkRunner`:**
+  - **Trials:** paired trials (every arm on the same scenario with seed `benchmark.seed + k`) and a seeded arm-order shuffle per (scenario, trial).
+  - **Isolation:** a fresh adapter, models and memory per episode, and one store run per episode.
+  - **Memory regimes:** cold (an empty graph per trial, learning within the episode only, saved per arm and trial for inspection) and warm (a per-arm frozen checkpoint whose sha256 is checked after the run). Cross-arm checkpoints are refused unless `--shared-checkpoint`, and same-level learning is labeled.
+  - **Checks before any spend:** arms, regime, prices, credentials, output directory, and one reset per (scenario, seed), which gives the scenario hashes.
+  - **Manifest:** written before the first episode and updated after each one.
+  - **Records:** `episodes.jsonl` is appended per episode. Errors become `outcome: error` records and the run goes on. Ctrl-C leaves an `interrupted` manifest listing what did not run.
+  - **Ceiling:** the paid-run ceiling (`benchmark.paid_run_budget_usd`) stops scheduling, with the reason `budget_stopped`.
+  - **Also here:** `train_memory` (builds warm checkpoints) and `resummarize`.
+- **`evaluation/`:**
+  - `metrics.episode_record`: the primary metrics and the secondary metrics, including the fixed repeated-failure key `(start tile, skill, failure type)`;
+  - `statistics` (stdlib): percentiles, Wilson, seeded bootstrap, exact McNemar;
+  - `summary.summarize`: groups that never pool regime, mode or environment; paired arm comparisons matched on (trial, seed).
+- **Cost:**
+  - **Azure estimates.** `models.planner.price` and `models.tactical_llm.price` (null by default) give Azure calls an *estimated* `cost_usd`, with the price source and date recorded.
+  - **Unknown cost** stays null and is counted, never zero.
+  - **Unpriced live arms** are refused unless `--allow-unpriced` is passed.
+- **Runner:** `EpisodeResult` gains `wall_seconds` (monotonic), `decision_latency_ms` (all calls for one decision, re-asks included), `decision_calls` and `execution_starts`. A run that raises carries its partial result on the exception (`episode_result`).
+- **CLI:** `benchmark`, `summarize` and `train-memory`.
+- **Config:**
+  - `benchmark.seed`, `confidence` and `bootstrap_samples`;
+  - `models.*.price`;
+  - new `configs/benchmark_dave.yaml`, with Dave-scale frame settings taken from the measured skill durations (`scripts/skill_frames.py`).
+- **Tests:**
+  - `test_statistics.py` (4);
+  - `test_benchmark_metrics.py` (8): cost aggregation, unknown cost, latency split, failure inclusion, the repeated-failure key, pairing, no pooling, the Azure estimate;
+  - `tests/integration/test_benchmark_mock.py` (10): reproducibility, schedule, per-arm and per-trial graphs, the warm regime and its refusals, the ceiling, errors, interrupt, unpriced refusal, the reach-hints switch, the CLI.
+
+## After Phase 9: learning from deaths (2026-10-03)
+
+The problem: in live level-2 runs, Dave died and then repeated the same moves. Jev answers the same request the same way, and after a respawn nothing in the request said what had killed him. Arm C's graph recorded the deaths but only steered route waypoints, and the demos were arm B.
+
+- **Experience notes on candidates** (`control/experience.py`, `docs/memory.md` "Experience notes"):
+  - every arm: `this episode from here: 2x, 2 died (burned), last end [3,9]`, from working memory's new per-(tile, skill) experience table, which survives respawns;
+  - graph arms: `past runs from this platform: 5x, 3 ok, 2 fatal, lands row 7 cols 4-9`, from `WorldGraph.skill_evidence` on the graph as it was at episode start (frozen warm checkpoints too, through `run_episode(evidence=…)`).
+  - Notes only inform; nothing is masked.
+- **Ctrl-C keeps the evidence.** `run_episode` finishes the episode as `truncated` / `interrupted` and writes the batched rows. `play` still saves a graph arm's checkpoint, prints `{"interrupted": true, …}` and exits 130. Before this change, `demo-B-L2` kept only its episode start.
+- **Level 2 needs no new skills.** `scripts/search_route.py` (breadth-first search on the real game, snapshot restore, fatal skills pruned) found a 37-skill route in 566 s (505 states). It begins with a zig-zag climb (`jump_right move_right_1 jump_left move_left_1 jump_right …`), picks up the trophy on the 9th skill (score 100 -> 1100), backtracks, and ends at the door at (46,2). `try_skills.py` replays it to `level_complete` in 1928 frames. The route is in `artifacts/search/level2-tile.json`. On level 1 the search finds an 8-skill route.
+- **Tests:** experience table (`test_working_memory.py`), notes and cap (`test_experience.py`, 2), `skill_evidence` (`test_graph.py`), past-run notes only on graph arms and read-only (`test_arm_parity.py`), interrupted `play` keeps its episode and graph (`test_cli_smoke.py`).
+
+## Decision inspector and viewer (2026-10-03)
+
+Details are in `docs/inspector.md`.
+
+- **`dave-agent inspect` (`runner/inspect.py`):**
+  - replays a recorded episode with its recorded choices (`ReplayPlanner` from the `goal_set` events, `ReplayController` from the decisions);
+  - graph arms start from the checkpoint before the run (the `.bak` when the file already includes it);
+  - every rebuilt tactical request must match the recorded `context_digest`, or the inspection stops;
+  - each decision's bundle holds the exact request, the exact Jev and Azure bodies, the recorded answer, the planner request and choice, a screenshot, and what every offered candidate really does from that state;
+  - `--ask jev|azure` (paid, needs `--decisions`) adds live answers to the same request.
+- **`frontend/`:** a local, read-only Next.js 16 viewer:
+  - a run list;
+  - a run page (decision heat map, goal timeline, decisions with back-and-forth loops marked);
+  - a decision page (the request's tile grid with Dave's pixel position, the waypoint, and the estimated versus real outcome of each option; the screenshot; options with Jev's probabilities; goal and planner; memory; exact payload tabs).
+- **Tests:** `tests/integration/test_inspect.py` (7):
+  - exact rebuild and bundle contents;
+  - determinism and selection;
+  - a corrupted digest stops it;
+  - graph checkpoints from before the run, and refusal otherwise;
+  - `--ask` refusals;
+  - the CLI;
+  - a Dave level-2 rebuild with screenshots.
+
+**What the inspector showed on `demo-C-L2-1`** (arm C, Jev, level 2; 92 model decisions, all digests verified):
+- **The reach estimates are off by one column.** 386 of 640 estimated end tiles differ from where the skill really ends. The estimator locates Dave one column left of `player.tile`. At (7,7) the waits say "estimated end tile [6, 7] (no movement)", so the request contradicts itself.
+- **The fatal step was a hint error.** At decision 94 on the ledge (4,5), the estimates said `jump_right` lands on [4,3] (up and right, which Jev rated 0.27); it really lands on [6,7]. `move_right_1` was estimated at [4,7]; it really goes to [5,6], and the next walk ends in the fire.
+- **The explore goal drove the back-and-forth walking.** The planner chose `explore:right` 6 times, with waypoint (20,7) or (20,9) beyond the pillar, so the waypoint offset said "go right" on a floor that ends at the pillar. 77 of 110 decisions were inside back-and-forth loops.
+- **Level-1 nodes in level-2 routes.** Arm C's level-2 route summaries list level-1 frontier nodes (`level1:r0:c0`, …).
+
+## Per-level graphs, threat screen and the planner's map (2026-10-03)
+
+The problems:
+- One learned graph served every level.
+- Nothing projected plasma or Dave's own path forward.
+- The planner never saw the layout, so it could not steer Dave around a wall or a fire pit, for example on level 2 by climbing the left ledges and crossing along the top.
+
+**One graph per level** (`docs/graph.md`):
+- `GraphStore` keeps one `WorldGraph` per level, stored as `artifacts/graphs/arm-C/<adapter>/<level>.json`.
+- A legacy combined `dave.json` is split by level on load.
+- A skill that changes level is never an edge, so level-1 nodes no longer appear in level-2 routes.
+- Deaths leave `incidents` (cause, tile, skill) on their start platform, and planner route summaries list them.
+- The inspector rebuilds each level from before the run.
+
+**Threat prediction and the candidate screen** (`control/threats.py`, `docs/skills.md`):
+- Every skill's path is simulated tick by tick and checked against the game's collision boxes for plasma (2 px/tick until a brick), monsters (linear) and hazard cells.
+- Candidates with a predicted contact are removed unless all have one, and the rest carry `danger: …` / `no threat predicted`.
+- A new interrupt, `threat_incoming`, stops walks and waits when a new threat is about to touch a standing Dave.
+
+Checking the simulation against the real game found and fixed six physics gaps (dave.c):
+- the ceiling test points;
+- a jump slipping past a ledge corner when the held direction clears it;
+- the side-test rows;
+- air control off ledges;
+- free-fall drift, which starts once a key turns Dave in the air;
+- falls continuing after a skill ends.
+
+Result on 300 random skills on levels 1–3:
+- all 8 burns predicted, with 0 false alarms;
+- 88% of end positions within 2 px.
+
+Long mock runs (arm C, `configs/watch.yaml`, 18,000 frames):
+
+| Level | Before | After |
+| --- | --- | --- |
+| 2 | game over at frame 5,194 (4 deaths) | 0 deaths |
+| 3 | 2 deaths | 0 deaths |
+
+The inspector verified 392 request digests on a replay.
+
+**The planner sees the explored map and can give waypoints** (`docs/planner.md`, "Map and waypoints"):
+- `PlanningRequest.map` holds every screen of the level seen so far (unseen cells `?`), with row numbers and a column ruler.
+- The Azure planner may return up to 5 standing tiles as `waypoints`, and is asked to do so when stuck. Python checks them against the map (invalid ones go back as retry feedback), and Jev follows them one by one ahead of the route and reach waypoints.
+- The map is the same for every arm.
+- **Not yet run live** (paid): the offline planners give no waypoints.
+
+**Tests:** `test_graph_store.py` (7), `test_threats.py` (11), `test_planner_map.py` (5). The goal-route, parity, benchmark, CLI and inspect tests were updated for stores. 280 pass, including the real-game tests.
+
+**Replay note:** the screen changes what the tactical models see, so runs recorded before it no longer match their digests in `inspect`.
+
+## Live viewer (2026-10-04)
+
+`dave-agent live` and the `/live` page in `frontend/` (`docs/live.md`) let you choose a level and arm in the browser, then watch:
+- the real game (bridge frames, about 20 per second);
+- every tactical decision as it is made: Jev's probabilities, the skills the threat screen removed and why, and the outcome;
+- the planner's explored map, goal, waypoints and reasons.
+
+How it works:
+- **Recorded like `play`:** a live run goes through `run_trial`, so it is recorded like `play` and can be inspected.
+- **Write-only hook:** the stream comes from the new `on_event` hook in `run_episode`, which changes no decision.
+- **Paid runs** need `--allow-paid`.
+- **Setup shared with `play`:** graph setup moved to `session.open_graph`, used by both `play` and `live`.
+
+Checks:
+- tests: `test_live.py` (6);
+- checked on level 2 in headless Chrome;
+- a stopped live run replayed in `inspect` with its digests verified.
+
 ## Verification (run 2026-10-03)
 
 ```bash
 export UV_PROJECT_ENVIRONMENT=jev   # PowerShell: $env:UV_PROJECT_ENVIRONMENT="jev"
 scripts\setup_dave.bat              # clone + patch + build (cmd/PowerShell)
-uv run pytest                       # 178 passed, 1 skipped (live; RUN_LIVE=1). 24 drive the real game (-m dave)
+uv run pytest                       # 217 passed, 1 skipped (live; RUN_LIVE=1). 24 drive the real game (-m dave)
 uv run python scripts/calibrate_skills.py
 #   walk 2 px / 3 ticks (16 px at 24, 48 px at 72); jump apex 32 px, lands after 94 ticks
 #   holding Up re-jumps after 5 ticks; landing cooldown 5 ticks; long jump dx 94, short dx 32
@@ -187,11 +384,82 @@ uv run dave-agent probe-provider --provider azure                  # LIVE (paid)
 uv run dave-agent play --arm A --mock --planner live --adapter dave --scenario level1   # LIVE planner, mock tactical
 #   mode live-planner, 2 planner calls, both ok (1264 ms / 1553 ms; 920 / 1028 total tokens), 0 failures
 #   goals: collect:trophy:c11:r3 ("required to finish the level"), then on stuck explore:right
+uv run dave-agent play --arm A                                       # Phase 7: fixture, via ModelController
+#   unchanged: game_over, 41 frames, 17 decisions (17 model decisions, 0 fallbacks, 17 tactical calls)
+uv run dave-agent play --arm A --adapter dave --scenario level2
+#   unchanged: candidate_trace 2a57449186e2a6b3, 14 decisions (9 forced, 5 model)
+uv run dave-agent probe-provider --provider azure --purpose tactical          # LIVE (paid)
+#   status ok, gpt-5.4-mini, 1420 ms, 765 prompt + 83 completion tokens (61 reasoning), valid choice c1_move_right
+uv run dave-agent play --arm A --planner live --tactical live --adapter dave --scenario level1 --run-id p7-live-smoke-1   # LIVE
+#   mode live; budget printed first; truncated max_frames:600 (690 frames); 9 decisions, all model decisions,
+#   0 fallbacks, 0 tactical failures; tactical latency mean 2832 ms (p50 2741, max 4203);
+#   tokens: tactical 14542 (10472 prompt, 4070 completion, 3844 reasoning), planner 1919 (2 calls, both ok)
+#   play: move_right_3 x2, jump_right_short x2, then jump_up / step left-right under the trophy (c11 r3); score 0, no deaths
+uv run dave-agent export --run-id p7-live-smoke-1 --out L.jsonl && uv run dave-agent replay --jsonl L.jsonl
+#   64 records; replay ok (9 decisions); only env var *names* appear in the export, no credentials
+uv run dave-agent play --arm A|B|C                                # Phase 8: fixture, mock
+#   unchanged: 41 frames, 17 decisions, candidate_trace 38b901ad24333f4f for all three arms
+uv run dave-agent play --arm A --adapter dave --scenario level2
+#   unchanged: candidate_trace 2a57449186e2a6b3, 14 decisions
+uv run dave-agent probe-provider --provider jev --save-fixture             # LIVE (paid)
+#   ok, typesafe/jev-1.13-20260917, 343 ms, 1245 in + 78 out tokens, $5.23e-05;
+#   choice c1_move_right p 0.73 (c4_jump_right 0.15), confidence 0.68; fixture saved, no credentials
+uv run dave-agent play --arm B --planner live --tactical live --adapter dave --scenario level1 \
+    --store artifacts/p8-live.sqlite --run-id p8-live-B                    # LIVE; then C, then A
+#   B (Jev):   12 decisions, all model, 0 fallbacks; tactical latency mean 236 ms (p50 163, max 720);
+#              26.1k tactical tokens; $0.00102; 3 planner calls (no_goal, stuck x2); 622 frames, truncated
+#   C (Jev+graph): 9 decisions, all model, 0 fallbacks; mean 177 ms (p50 159, max 306); 19.3k tokens;
+#              $0.00076; 3 planner calls; 682 frames, truncated; graph checkpoint written (15 nodes)
+#   A (Azure): 10 decisions, all model, 0 fallbacks; mean 2535 ms (p50 2648, max 3777); 15.7k tokens;
+#              2 planner calls; 635 frames, truncated
+#   all: score 0, no deaths, every skill completed
+#   first-decision context_digest: A = B = sha256:7b21dadb6e2ea12d; C differs (its live planner chose explore:right)
+uv run dave-agent export --store artifacts/p8-live.sqlite --run-id p8-live-X --out artifacts/p8-live-X.jsonl
+uv run dave-agent replay --jsonl artifacts/p8-live-X.jsonl                 # A, B, C: no mismatches
+#   no API key, "Bearer", "sk-or-" or "api-key" in any export
+```
+
+```bash
+# Phase 9
+uv run pytest                                                  # 245 passed, 1 skipped
+uv run dave-agent benchmark --arms A,B,C --trials 3 --id repro --out R1   # and again with --out R2
+#   fixture (labeled "synthetic test platformer, not Dangerous Dave"), 9 episodes, status complete;
+#   manifest, episodes.jsonl, summary.json and pairs.csv identical across R1/R2 apart from VOLATILE_FIELDS;
+#   A/B/C identical (same seeded mock): 0/3 completions each, Wilson CI [0, 0.5615], paired diff 0, McNemar p 1
+uv run python scripts/skill_frames.py artifacts/watch.sqlite artifacts/p8-live.sqlite artifacts/events.sqlite
+#   1707 Dave executions: walks 24/72, long jumps p50 44, short jumps p50 85-95, max 138 frames
+uv run dave-agent benchmark --config configs/benchmark_dave.yaml --adapter dave --scenarios level1 --arms A,B,C --trials 3
+#   mock on Dave: 9 episodes in 36 s, all truncated at max_frames:3600 (the random mock never finishes level 1)
+uv run dave-agent train-memory --config configs/benchmark_dave.yaml --adapter dave --scenarios level1 --arm C --episodes 3 --out CK.json
+#   3 x 3600-frame episodes: 15 nodes, 9 visited, 24 edges (48 attempts, all successes); the 600-frame live run learned 0 edges
+uv run dave-agent benchmark --config configs/benchmark_dave.yaml --adapter dave --scenarios level1 --arms B,C --trials 2 \
+    --memory-regime warm --checkpoint C=CK.json
+#   complete; checkpoint sha256 76daaa84... unchanged; memory B none, C frozen-checkpoint; same_level_learning [level1]
+uv run dave-agent benchmark ... --arms A --trials 1 --reach-hints off   # ablation: manifest and records say reach_hints false
+uv run dave-agent play --arm A|B|C ; play --adapter dave --scenario level1|level2
+#   unchanged: fixture 41/17 38b901ad24333f4f; level 1 97b1dc188deb88ba; level 2 2a57449186e2a6b3
+
+# After Phase 9 (experience notes, interrupt, route search)
+uv run pytest                                                  # 251 passed, 1 skipped
+uv run dave-agent play ...                                     # traces unchanged (mocks ignore descriptions)
+uv run python scripts/search_route.py --scenario level1        # found, 8 skills, 226 states, 103 s
+uv run python scripts/search_route.py --scenario level2 --max-states 4000 --max-depth 60     --out artifacts/search/level2-tile.json                    # found, 37 skills, 505 states, 566 s
+uv run python scripts/try_skills.py --config configs/benchmark_dave.yaml --scenario level2 <route>
+#   level_complete, 1928 frames
+
+# Decision inspector
+uv run pytest                                                  # 258 passed, 1 skipped
+uv run dave-agent inspect --store artifacts/benchmark-dave.sqlite --run-id demo-C-L2-1
+#   92 of 92 model decisions rebuilt with matching digests (graph from arm-C/dave.json.bak), 92 bundles with
+#   outcomes and screenshots, 5 min 20 s
+cd frontend && npm run lint && npx tsc --noEmit && npm run build   # clean, no warnings
+npx next start   # /, /runs/demo-C-L2-1, /runs/demo-C-L2-1/94, /api/shot/demo-C-L2-1/94 -> 200; unknown run,
+                 # unknown decision and a traversal id -> 404
 ```
 
 Screenshot cross-check: after the pickup, Dave is drawn at about (15,112) against the recorded (14,112), the gem at tile (1,7) is gone, and the HUD shows score 100. Map rows line up at 16 px per tile.
 
-These runs use **mock tactical controllers**. The only live evidence is the Azure *planner* (labeled `mode=live-planner`). No LLM or Jev tactical gameplay results exist yet, so live A/B integration is **not** complete.
+Live evidence covers **arms A, B and C** (labeled `mode=live`): one smoke episode each on Dave level 1, seed 0. This shows the live integration works end to end; it is **not** a performance comparison. That is Phase 9 (benchmark protocol, calibrated episode length, repeated trials).
 
 ## Decisions
 
@@ -207,6 +475,9 @@ These runs use **mock tactical controllers**. The only live evidence is the Azur
 - **Fallback priority** (reach door > trophy > item > loot > explore right > explore left > recover) is also the offline rule planner's policy, so mock runs are reproducible.
 - **Rerouting on graph arms is Python only.** Only a route lost after being found asks the planner (`route_invalidated`).
 - **Expiry is a `goal_failed` event with `status=expired`;** the schema has no separate event type.
+- **One tactical policy for every arm:** `ModelController` owns retry, fallback and budgets; providers only produce raw output and parse it. Offline, the CLI runs the seeded mock through the same wrapper.
+- **Transport failures are re-asked too** (after the client's own transport retries), like the planner. The fallback is `wait_short` / `wait`: safe and deterministic, but it makes no progress.
+- **Budget exhaustion terminates by default** (`truncated`, `budget:<name>`), so a paid run never silently continues as a fallback-only episode.
 - **Item-superset assumption:** an edge observed with items S is usable whenever S is held, even alongside other items. This is not verified for jetpack mode.
 - **Episode keys are `run_id/episode_id`,** because adapter episode ids (`fixture_l1-s0-e1`) repeat across runs.
 - **Truncation is checked between skills,** so an episode can overrun `max_episode_frames` by at most one skill (≤ 238 frames).
@@ -217,25 +488,65 @@ These runs use **mock tactical controllers**. The only live evidence is the Azur
 - **Death cause `unknown`:** the bridge does not yet expose what set `on_fire`.
 - **Fixture jump rule:** a jump triggers on a fresh press only. This applies to the fixture only.
 - **Same seeded mock for both arms** in offline mode, so A and B trajectories are identical by construction.
-- **Jev via OpenRouter**, and **Azure deployment from `AZURE_OPENAI_CHAT_DEPLOYMENT`**. No Azure calls yet.
+- **Jev via OpenRouter**, and **Azure deployment from `AZURE_OPENAI_CHAT_DEPLOYMENT`** (verified live in Phases 6 and 7).
+- **Jev gets arm A's exact content:** the same request JSON as `state`, plus the same rules, input guide and task text that arm A gets in its system prompt. Only the transport differs: a choice question with criteria for Jev, a strict JSON-schema enum for Azure.
+- **A death ends the goal.** The respawn puts Dave back at the level start, so a goal's route and waypoint are stale; ending it makes the replan a hard trigger.
+- **`provider_score` is Jev's probability for the chosen candidate.** `confidence` is recorded but not used to decide anything until it is calibrated (Phase 11).
+- **Sideways jumps press the direction only after takeoff** (2026-10-03, after Phase 8). Diagnosing a live Jev level-1 run showed jumps right after a landing walking Dave off 1-tile pillars during the hidden 5-tick cooldown. Flat-ground measurements are unchanged (calibration 12/12), and the offline traces are unchanged (`97b1dc188deb88ba` level 1, `2a57449186e2a6b3` level 2, fixture 41/17).
+- **`moved_px` in recent history** (observed displacement), the same for every arm. In the live Jev run, 5 of 12 skills were walks into a wall that reported `completed` with no visible "nothing happened" signal.
+- **A web viewer after all (user decision, 2026-10-03).** The spec says "do not build a web application" for V1 (`implementation/01-project-overview.md`). On request, `frontend/` is a local, read-only Next.js viewer of inspection bundles: no deploy, no model calls, no writes, and no game assets in `public/`.
+- **The inspector rebuilds rather than logs request text.** The store already holds a digest per request. A replay checked against those digests gives the exact text without growing every episode store, and proves the replay is exact.
+- **Level 2 is completable with the catalog alone too** (`scripts/search_route.py`, 37 skills, 1928 frames). So level-2 failures are decision and memory problems as well, not missing skills.
+- **Experience reaches the models as candidate notes, never as masks.** Masking a move that killed Dave would be a hand-written policy doing the model's job. Notes give every arm the same facts, and graph arms add their past-run evidence, which keeps memory the variable between B and C.
+- **Level 1 is completable with the catalog alone** (`scripts/try_skills.py`, 10 skills, 554 frames; see `docs/skills.md`). Failures to finish are decision and information problems, not missing skills.
+- **Reachability waypoints and estimated end tiles** (every arm, Dave only). With the waypoint alone, Jev still jumped into the ceiling at (7,9) 310 times. With the estimated end tile on each candidate, live Jev finished level 1: 11 decisions, 470 frames, $0.001 (run `diag-jev-3`). Without either, it never left the floor in 400 decisions (`diag-jev-1`). The models now mostly choose among estimated outcomes; Phase 9 should report this as the setup, and an ablation without estimates is worth keeping.
+- **Episode-level statistics, stdlib only.** No pandas or numpy dependency: a Wilson interval for completion, a seeded percentile bootstrap over whole pairs for paired differences, exact McNemar for discordant pairs. Frames are never samples.
+- **A fresh adapter process per benchmark episode.** Adapter episode counters and any hidden state cannot depend on arm order. On Dave this costs one bridge start per episode.
+- **Unknown cost is null, offline mocks are zero.** A paid provider's call with no reported or estimated cost makes the episode's `cost_usd` null and is counted; summaries then give no cost per attempt instead of an underestimate.
+- **Warm checkpoints are reloaded every episode and never saved.** Nothing a goal manager does in memory can carry between trials, and the file hash is verified at the end.
+- **Benchmark output directories are never reused.** A non-empty `--out` is refused, so records from two runs cannot mix.
+- **No cost budget for now:** it could only ever fire for Jev, which would make the arms asymmetric. Jev costs about $0.0001 per decision.
 
 ## Open issues
+
+- **Reach estimates are one column off** (found with the inspector; see above). Candidate notes and waypoints can point to the wrong tile. Fix and re-check against real outcomes (`inspect` writes both) before the next live run.
+- `explore` goals put the waypoint on Dave's row at the level's right edge, even behind a pillar. This drives back-and-forth walking. Planner waypoints over the explored map are meant to fix this, but have not run live yet.
+- The threat screen applies to standing and falling Dave, not mid-jump. Monster motion is linear extrapolation. In mock runs the remaining risk is random walks off ledges that the screen keeps because every option is equally risky.
 
 - Asset licensing: deadly-dave's `res/` art and levels come from the original game. Use them locally only; do not commit them here.
 - Jetpack (`P`) is wired but not exercised. Fire is verified (Phase 3).
 - Climbing needs an input sequence that has not been measured yet. Trees are observed as `climbable` tiles, but no skill uses them.
 - The landing cooldown (5 ticks) is hidden state. A jump requested right after landing spends up to 5 ticks in its first phase.
-- The working-memory window (120 frames) is fixture-scale and holds only a few Dave skills. Calibrate it, and every `planning:` value, on Dave in Phase 9.
-- Mock tactical controllers ignore goals, so mock runs mostly show `stuck` and expiry triggers. At fixture scale (41-frame episodes) the 60-frame debounce hides death triggers.
+- `configs/benchmark_dave.yaml` values (memory window 600, stuck 240, debounce 150, goal timeout 1200, episode 3600 frames) come from skill durations and the level-1 route length, not from benchmark outcomes. Revisit them after the smoke trials. `experiments.yaml` keeps the fixture-scale values.
+- Mock tactical controllers ignore goals, so mock runs mostly show `stuck` and expiry triggers.
 - `explore` targets are a direction and a column, not a verified reachable location.
-- Azure cost is not computed (no price table); token usage is recorded per call.
+- Azure cost is not computed (no price table); token usage is recorded per call, so `max_cost_usd_per_episode` cannot fire for Azure.
+- Live Azure tactical calls average about 2.5–2.8 s, mostly reasoning tokens (about 380–430 per call at `reasoning_effort: low`). Lower settings were not tested on this deployment. Jev calls average about 0.2 s, but the game is paused during decisions, so latency does not affect play yet (Phase 11).
+- Jev's chosen-candidate probabilities on Dave were mostly 0.24–0.52, spread across walking and jumping skills.
+- The planner (live and rule-based) always prioritises the trophy, so Dave no longer wanders into coins as the random mock did. This is intended: coins only add score.
+- The route-relevant facts the models lack are which jump lands where (narrow pillars), and the hidden landing cooldown, which `wait_short` covers but which is not observable.
+- In the 600-frame live C run, the graph learned 15 nodes but no edges. With 3600-frame episodes, 3 mock training episodes learned 24 edges (Phase 9). Whether those routes help a live arm C is untested.
+- The store schema changed to v2. Export old stores to JSONL before deleting them.
+- No live benchmark has run. The paid smoke run is below; Azure prices must be filled in first (or `--allow-unpriced`).
+- Continual learning (graph updates across evaluation episodes, with a learning curve) is not implemented; the spec marks it optional.
 - The graph's segment rule marks a "platform" above the top brick row (level 1, row 0). Dave reaches it only by wrapping, so it mostly shows up as frontier.
 - Edge keys ignore the start position within a segment, so a failure whose target is ambiguous stays on the node.
 - `EpisodeResult` still keeps every per-frame `StepResult` in memory. That is fine at the current episode lengths, but revisit it before 18000-frame benchmark episodes.
 
-## Next steps (Phase 7)
+## Next steps
 
-1. LLM tactical controller (`models/`, Azure): chooses one `candidate_id` from the same candidates, observation and `MemoryContext` (including the goal and waypoint), with a strict JSON schema and the same validation and retry pattern as the planner.
-2. Live run modes in `play` (drop the `--mock` requirement for arm A): validate prerequisites and show the configured budget before any paid call.
-3. Record latency, tokens and failures per tactical call. Arm A smoke runs on Dave level 1, labeled live.
-4. Keep arms B and C on mock tactical until Phase 8 (Jev client).
+**Paid smoke run (not yet run; your call).** First set `models.planner.price` and `models.tactical_llm.price` in `configs/models.yaml` to your Azure deployment's prices, with the source and date. Then:
+
+```bash
+uv run dave-agent benchmark --config configs/benchmark_dave.yaml --adapter dave --scenarios level1 \
+    --arms A,B,C --trials 3 --planner live --tactical live
+```
+
+- **Hard caps:** 9 episodes, worst case 3600 tactical calls (400 per episode) and 270 planner calls (30 per episode). The $5 ceiling (`benchmark.paid_run_budget_usd`) is checked before each episode.
+- **Expected:** far less. A level-1 completion took 11 decisions. Jev cost about $0.0001 per decision. An Azure call used about 1.5k tokens (planner and tactical) and took about 2.5–2.8 s.
+- **Then:** about 30 paired trials per scenario, with `--reach-hints off` as the ablation, and a warm regime for arm C from `train-memory`.
+
+**Phase 10** (`implementation/12-phase-10-reporting-replay-and-human-inspection.md`):
+- Markdown/HTML reports built on `summary.json`, `pairs.csv` and `episodes.jsonl`: config table and limitations, completion with intervals, cost and latency, deaths and termination reasons, learning curves for warm and continual regimes, controller, fallback and planner breakdowns, trace examples, and a graph diagram.
+- A step inspector (observation, goal, candidates, decision, outcome at one step).
+- Replay that tells input replay apart from re-querying models.

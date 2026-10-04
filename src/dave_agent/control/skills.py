@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from dave_agent.adapters.base import GameAdapter
 from dave_agent.config import ExecutorConfig, SkillSpec
 from dave_agent.control.predicates import check
+from dave_agent.control.threats import STANDING_STATES, imminent, threats, time_to_contact
 from dave_agent.schemas import Event, Observation, SkillCandidate, StepResult
 
 # Entity types that never threaten Dave (his own bullet).
@@ -132,7 +133,22 @@ def _new_hazard(obs: Observation, seen: frozenset[str], radius: int) -> str | No
     return None
 
 
-def _interrupt(spec: SkillSpec, step: StepResult, seen: frozenset[str], cfg: ExecutorConfig) -> str | None:
+def _incoming(obs: Observation, expected: frozenset[str], cfg: ExecutorConfig) -> str | None:
+    """A threat predicted to touch Dave within ``interrupt_ticks`` if he stays put, other than
+    one already predicted when the skill started (the choice took those into account). Only
+    while he stands: a jump in the air cannot be changed."""
+    if obs.player_state not in STANDING_STATES or not obs.grounded:
+        return None
+    for threat in threats(obs):
+        if threat.entity_id not in expected:
+            contact = time_to_contact(obs, cfg.threats, threat.entity_id)
+            if contact is not None:
+                return f"{contact.what}@{contact.tick}"
+    return None
+
+
+def _interrupt(spec: SkillSpec, step: StepResult, seen: frozenset[str], cfg: ExecutorConfig,
+               expected: frozenset[str] = frozenset()) -> str | None:
     obs = step.observation
     rules = spec.interrupt_on
     if "death" in rules and any(e.event_type == "death" for e in step.events):
@@ -145,6 +161,10 @@ def _interrupt(spec: SkillSpec, step: StepResult, seen: frozenset[str], cfg: Exe
         entity = _new_hazard(obs, seen, cfg.hazard_radius_px)
         if entity is not None:
             return f"new_hazard_nearby:{entity}"
+    if "threat_incoming" in rules:
+        threat = _incoming(obs, expected, cfg)
+        if threat is not None:
+            return f"threat_incoming:{threat}"
     return None
 
 
@@ -182,6 +202,8 @@ def execute(
               payload={"candidate_id": candidate.candidate_id, "skill": spec.name}, **base)
     )
     seen = frozenset(e.entity_id for e in observation.entities)
+    # Threats that would already reach a standing Dave soon: the choice took these into account.
+    expected = imminent(observation, cfg.threats) if "threat_incoming" in spec.interrupt_on else frozenset()
     for index, phase in enumerate(spec.phases):
         buttons = frozenset(phase.buttons)
         satisfied = False
@@ -194,7 +216,7 @@ def execute(
             result.frames += step.frames_advanced
             result.input_ticks += 1
             result.observation = step.observation
-            reason = _interrupt(spec, step, seen, cfg)
+            reason = _interrupt(spec, step, seen, cfg, expected)
             if reason is not None:
                 result.outcome, result.reason = "interrupted", reason
                 result.events.append(_finished(result, base, step.observation.frame))

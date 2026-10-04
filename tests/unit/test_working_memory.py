@@ -170,3 +170,24 @@ def test_detector_inventory_and_area_events(adapter):
     got = moved.model_copy(update={"inventory": {"trophy": 1}})
     (inv,) = detector.observe(got)
     assert inv.event_type == "inventory_changed" and inv.payload == {"changes": {"trophy": [0, 1]}}
+
+
+def test_experience_survives_respawn_and_is_cleared_by_reset(adapter):
+    mem = memory()
+    mem.reset(adapter.reset("fixture_l1", 0))
+    for _ in range(3):
+        start = player_tile(mem.latest.player_position)
+        run = act(adapter, mem, "right")  # the third step runs into the fire at (4,4)
+    assert run.reason == "death"
+    act(adapter, mem, "wait")
+    seen = mem.experience(start)["right"]
+    assert (seen.attempts, seen.deaths, seen.burned) == (1, 1, 0) and seen.last_end == run_end(run)
+    assert "wait" not in mem.experience(start)  # wait ran from the respawn tile
+    here = player_tile(mem.latest.player_position)
+    assert mem.experience(here)["wait"].no_move == 1
+    mem.reset(adapter.reset("fixture_l1", 0))
+    assert mem.experience(start) == {} and mem.experience(here) == {}
+
+
+def run_end(run):
+    return player_tile(run.observation.player_position) if run.observation.player_position else None

@@ -1,0 +1,136 @@
+{
+  "_meta": {
+    "endpoint": "https://openrouter.ai/api/alpha/decisions",
+    "captured_at": "2026-10-03T21:05:18+00:00",
+    "latency_ms": 343.3,
+    "note": "Sanitized live response from 'dave-agent probe-provider --provider jev --purpose tactical --save-fixture'; no credentials included."
+  },
+  "request": {
+    "model": "typesafe/jev-1.13",
+    "state": {
+      "rules": "Game rules (verified):\n- Dave walks left/right, jumps, and can fire the gun only after collecting it. There is no ducking and no health bar: Dave has lives.\n- The level is completed by touching the door while holding the trophy. Touching the door without the trophy does nothing.\n- Fire, water and vines set Dave burning; touching a monster or its plasma does too. Burning ends in death, then Dave respawns at the level start. The game is over at 0 lives.\n- Loot (gems etc.) only adds score. The gun lets Dave shoot monsters. Falling off the bottom of the screen wraps to the top; it is not a death.\n- Coordinates are tile (col, row); row 0 is the top. Only the local view and what was seen earlier this episode are known.",
+      "input_guide": "- `player`: Dave's tile, pixel position (16 px per tile), movement state, facing and velocity.\n- `view.rows`: the visible tiles, one string per row starting at tile `view.origin` (col, row). Legend: # solid, X hazard (touching it sets Dave burning), $ loot, T trophy, D door, | climbable, I gun/jetpack, M monster, * plasma or bullet, @ Dave, . empty.\n- `entities`: visible monsters and shots with their tiles and velocities (pixels per frame).\n- `goal`: the current objective from the planner, with `waypoint` (the tile to head for now) and `waypoint_offset` (tiles from Dave: +col right, +row down).\n- `progress` and `recent`: how the last skills went (outcomes, interruptions, deaths).\n- `candidates`: the only skills you may choose, each with a description and its frame limit.",
+      "level_id": "fixture_l1",
+      "frame": 0,
+      "player": {
+        "tile": [
+          1,
+          4
+        ],
+        "px": [
+          16,
+          64
+        ],
+        "state": "standing",
+        "grounded": true,
+        "facing": "right",
+        "velocity": [
+          0,
+          0
+        ]
+      },
+      "lives": 3,
+      "inventory": {
+        "trophy": 0
+      },
+      "score": 0,
+      "view": {
+        "origin": [
+          0,
+          0
+        ],
+        "rows": [
+          "######",
+          "#.....",
+          "#.$...",
+          "#.....",
+          "#@..X.",
+          "######"
+        ]
+      },
+      "entities": [],
+      "goal": null,
+      "progress": {
+        "no_progress_frames": 0,
+        "stuck": false,
+        "consecutive_failures": 0,
+        "repeated_failures": false,
+        "skill_repeats": 0,
+        "tile_revisits": 0,
+        "tiles_visited": 1
+      },
+      "recent": [],
+      "candidates": [
+        {
+          "id": "c0_move_left",
+          "description": "",
+          "max_frames": 1
+        },
+        {
+          "id": "c1_move_right",
+          "description": "",
+          "max_frames": 1
+        },
+        {
+          "id": "c2_jump",
+          "description": "",
+          "max_frames": 3
+        },
+        {
+          "id": "c3_jump_left",
+          "description": "",
+          "max_frames": 3
+        },
+        {
+          "id": "c4_jump_right",
+          "description": "",
+          "max_frames": 3
+        },
+        {
+          "id": "c5_wait",
+          "description": "",
+          "max_frames": 1
+        }
+      ]
+    },
+    "questions": {
+      "skill": {
+        "type": "choice",
+        "instructions": "Choose the skill that best moves Dave toward the waypoint without touching hazards, monsters or plasma. Avoid repeating a skill that keeps failing. Which offered candidate skill should Dave run next?",
+        "criteria": {
+          "c0_move_left": " (at most 1 frames)",
+          "c1_move_right": " (at most 1 frames)",
+          "c2_jump": " (at most 3 frames)",
+          "c3_jump_left": " (at most 3 frames)",
+          "c4_jump_right": " (at most 3 frames)",
+          "c5_wait": " (at most 1 frames)"
+        }
+      }
+    }
+  },
+  "response": {
+    "model": "typesafe/jev-1.13-20260917",
+    "answers": {
+      "skill": {
+        "type": "choice",
+        "choice": "c1_move_right",
+        "probabilities": {
+          "c0_move_left": 0.05,
+          "c3_jump_left": 0.01,
+          "c5_wait": 0.02,
+          "c1_move_right": 0.73,
+          "c2_jump": 0.04,
+          "c4_jump_right": 0.15
+        },
+        "confidence": 0.68
+      }
+    },
+    "usage": {
+      "input_tokens": 1245,
+      "output_tokens": 78,
+      "cost": 5.229e-05
+    },
+    "id": "gen-dec-1791061516-4kQOM51Y3JS73dJEi96c",
+    "provider": "TypeSafe"
+  }
+}

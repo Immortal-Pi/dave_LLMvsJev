@@ -52,9 +52,49 @@ def test_arms_share_mock_trajectory(capsys):
         assert a[key] == b[key]
 
 
-def test_live_mode_refused_without_spending(capsys):
-    code, _, err = _run(capsys, "play", "--arm", "A", "--config", str(CONFIG))
-    assert code == 2 and "--mock" in err
+def test_default_play_is_offline_and_counts_model_decisions(capsys):
+    code, out, _ = _run(capsys, "play", "--arm", "A", "--config", str(CONFIG))
+    summary = json.loads(out)
+    assert code == 0 and summary["mode"] == "mock"
+    assert summary["model_decisions"] + summary["fallback_decisions"] + summary["forced_decisions"]         == summary["decisions"]
+    assert summary["tactical_calls"] == summary["model_decisions"] and summary["fallback_decisions"] == 0
+    assert summary["settings"]["tactical"] == {"provider": "mock", "model": "mock-llm"}
+
+
+@pytest.mark.parametrize(("argv", "message"), [
+    (("--arm", "A", "--mock", "--tactical", "live"), "--mock"),
+])
+def test_live_tactical_refused_for_wrong_arm_or_mock(capsys, argv, message):
+    code, _, err = _run(capsys, "play", *argv, "--config", str(CONFIG))
+    assert code == 2 and message in err
+    assert not STORE.exists()
+
+
+def test_live_tactical_needs_azure_settings_before_running(capsys, monkeypatch):
+    from dave_agent.models import azure
+
+    monkeypatch.setattr(azure, "load_dotenv", lambda: None)
+    monkeypatch.delenv("AZURE_OPENAI_API_KEY", raising=False)
+    code, _, err = _run(capsys, "play", "--arm", "A", "--tactical", "live", "--config", str(CONFIG))
+    assert code == 2 and "AZURE_OPENAI_API_KEY" in err
+    assert not STORE.exists()  # refused before the game or the store was touched
+
+
+@pytest.mark.parametrize("arm", ["B", "C"])
+def test_live_jev_tactical_needs_openrouter_key_before_running(capsys, monkeypatch, arm):
+    from dave_agent.models import jev
+
+    monkeypatch.setattr(jev, "load_dotenv", lambda: None)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    code, _, err = _run(capsys, "play", "--arm", arm, "--tactical", "live", "--config", str(CONFIG))
+    assert code == 2 and "OPENROUTER_API_KEY" in err
+    assert not STORE.exists()  # refused before the game or the store was touched
+
+
+def test_probe_jev_planner_purpose_refused(capsys):
+    code, _, err = _run(capsys, "probe-provider", "--provider", "jev", "--purpose", "planner",
+                        "--config", str(CONFIG))
+    assert code == 2 and "tactical" in err
 
 
 def test_live_planner_needs_azure_settings_before_running(capsys, monkeypatch):
@@ -112,3 +152,42 @@ def test_graph_arm_learns_checkpoint_and_graph_command_inspects_it(capsys, tmp_p
     # Graph-disabled arms never create or read a checkpoint.
     code, out, _ = _run(capsys, "play", "--arm", "A", "--mock", "--config", str(CONFIG))
     assert code == 0 and json.loads(out)["graph"] is None
+
+
+def test_interrupted_play_keeps_its_episode_and_graph(capsys, tmp_path, monkeypatch):
+    """Ctrl-C mid-episode: the recorded decisions are written, the episode row is finished as
+    truncated/interrupted, and a graph arm still saves what it learned."""
+    import dataclasses
+    import sqlite3
+
+    from dave_agent import cli
+    from dave_agent.runner import session
+
+    class StopAfter:
+        def __init__(self, inner, n):
+            self.inner, self.n, self.provider, self.model = inner, n, inner.provider, inner.model
+
+        def decide(self, *args):
+            self.n -= 1
+            if self.n < 0:
+                raise KeyboardInterrupt
+            return self.inner.decide(*args)
+
+    def interrupting(*args):
+        models = session.build_models(*args)
+        return dataclasses.replace(models, controller=StopAfter(models.controller, 4))
+    monkeypatch.setattr(cli, "build_models", interrupting)
+    ckpt = tmp_path / "g.json"
+    code, out, err = _run(capsys, "play", "--arm", "C", "--mock", "--config", str(CONFIG), "--graph", str(ckpt),
+                          "--run-id", "stopped")
+    assert code == 130 and out == ""
+    report = json.loads(err)
+    store = tmp_path / "g"  # a store path X.json is the directory X, one checkpoint per level
+    assert report["interrupted"] and report["graph_checkpoint"] == str(store) and store.is_dir()
+    with sqlite3.connect(STORE) as db:
+        outcome, reason, decisions = db.execute(
+            "SELECT outcome, termination_reason, decisions FROM episodes WHERE run_id = 'stopped'").fetchone()
+        rows = db.execute("SELECT COUNT(*) FROM decisions").fetchone()[0]
+    assert (outcome, reason) == ("truncated", "interrupted") and decisions == rows >= 4
+    (level,) = store.glob("*.json")
+    assert json.loads(level.read_text(encoding="utf-8"))["lineage"][0]["run_id"] == "stopped"

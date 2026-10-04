@@ -5,7 +5,7 @@ only a route lost after being found raises the soft trigger ``route_invalidated`
 """
 
 from dave_agent.control.goals import GoalManager
-from dave_agent.memory.graph import WorldGraph, edge_key
+from dave_agent.memory.graph import GraphStore, edge_key
 from dave_agent.memory.working import WorkingMemory
 from dave_agent.models.planner import ScriptedPlanner
 from dave_agent.schemas import TilePos
@@ -31,10 +31,11 @@ def o(**kw):
 
 
 def setup(config, graph_enabled=True):
-    g = WorldGraph("fixture", "test", "local_observed")
+    store = GraphStore("fixture", "test", "local_observed")
+    g = store.for_level("L1")
     planner = ScriptedPlanner([])
     cfg = config.planning.model_copy(update={"min_frames_between_calls": 0})
-    gm = GoalManager(planner, cfg, 1, g if graph_enabled else None, config.graph if graph_enabled else None)
+    gm = GoalManager(planner, cfg, 1, store if graph_enabled else None, config.graph if graph_enabled else None)
     mem = WorkingMemory(120, 64, 8, 180, 3)
     start = o()
     g.observe(start)

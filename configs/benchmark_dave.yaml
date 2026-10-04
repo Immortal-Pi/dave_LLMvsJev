@@ -1,0 +1,53 @@
+# Benchmark config for Dangerous Dave: experiments.yaml with the frame-based settings rescaled
+# from fixture scale to measured Dave skill durations. Identical for every arm.
+#   uv run dave-agent benchmark --config configs/benchmark_dave.yaml --adapter dave --scenarios level1 --arms A,B,C
+# Evidence (2026-10-03, scripts/skill_frames.py over artifacts/{watch,p8-live,events}.sqlite, 1707
+# Dave executions): walks 24 / 72 frames, long jumps p50 44, short jumps p50 85-95, waits 6 / 24,
+# longest skill 138; p75 of every skill except the ceiling-bonk jump_up spam = 72 frames ("a
+# typical skill"). Level 1: the scripted route takes 554 frames (10 skills); live Jev completions
+# took 470 frames (11 decisions). These are provisional: revisit them after the smoke trials.
+schema_version: 1
+scenario: level1
+memory:
+  recent_history_frames: 600   # 8 context entries x 72-frame typical skill (fixture: 120 = ~2 Dave skills)
+  max_history_entries: 64
+  context_entries: 8
+  episode_store: artifacts/benchmark-dave.sqlite   # play only; benchmarks write <out>/events.sqlite
+  store_batch_size: 200
+  graph_enabled: false
+  graph_checkpoint: null
+  graph_updates: true
+graph:
+  weights: {time: 1.0, risk: 1.0, uncertainty: 0.5}
+  reference_frames: 100
+  p_min: 0.05
+  p_max: 0.99
+  evidence_per_item: 20
+planning:
+  no_progress_frames: 240        # > the longest skill (138) and ~3 typical skills (fixture: 180)
+  repeated_skill_failures: 3
+  max_calls_per_episode: 30
+  min_frames_between_calls: 150  # ~2 typical skills between soft-trigger planner calls (fixture: 60)
+  goal_timeout_frames: 1200      # ~2x the whole scripted level-1 route (fixture: 480)
+  recent_events: 8
+  nearest_collectibles: 3
+tactical:
+  max_calls_per_episode: 400     # ~100 decisions per 3600 frames at ~37 frames/skill, x2 retries, x2 slack
+  max_tokens_per_episode: 1000000
+  max_cost_usd_per_episode: null
+  on_budget_exhausted: terminate
+  fallback_skills: [wait_short, wait]
+benchmark:
+  pilot_trials: 5
+  initial_trials: 30
+  max_episode_frames: 3600       # ~6.5x the scripted level-1 route (554); room for deaths (burn ~200 frames each)
+  max_episode_wall_seconds: 900  # Azure ~2.8 s/decision x ~100 decisions + planner calls, with slack
+  paid_run_budget_usd: 5
+  randomize_arm_order: true
+  seed: 0
+  confidence: 0.95
+  bootstrap_samples: 2000
+arms:
+  A: {planner: llm, tactical: llm, graph_enabled: false}
+  B: {planner: llm, tactical: jev, graph_enabled: false}
+  C: {planner: llm, tactical: jev, graph_enabled: true}

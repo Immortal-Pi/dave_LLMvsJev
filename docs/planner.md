@@ -2,11 +2,12 @@
 
 | File | Contents |
 | --- | --- |
-| `src/dave_agent/control/goals.py` | `TargetMemory`, `goal_candidates`, `evaluate` (goal lifecycle), `GoalManager` (triggers, debounce, cap, fallback, graph routes) |
+| `src/dave_agent/control/goals.py` | `TargetMemory`, `goal_candidates`, `evaluate` (goal lifecycle), `GoalManager` (triggers, debounce, cap, fallback, graph routes, planner waypoints, the threat screen) |
+| `src/dave_agent/control/level_map.py` | `render`: the explored level map the planner reads |
 | `src/dave_agent/models/planner.py` | `GoalCandidate`, `PlanningRequest`, `PlanChoice`, `parse_plan`, the `StrategicPlanner` protocol, `RuleMockPlanner`, `ScriptedPlanner` |
 | `src/dave_agent/models/azure.py` | `AzureChatClient` (httpx, transport retries) and `AzurePlanner` (system prompt, strict JSON schema) |
 
-The planner chooses **what** to do next. The tactical controller (mock for now; LLM in Phase 7, Jev in Phase 8) chooses **how**, one skill at a time. Every arm runs the same goal-manager code with the same `planning:` settings. Graph-enabled arms differ in one way only: Python adds learned-route summaries to the candidates and turns the chosen goal into a route waypoint. A test checks this.
+The planner chooses **what** to do next. The tactical controller (mock offline, live LLM for arm A, live Jev for arms B and C; see `docs/tactical.md`) chooses **how**, one skill at a time. Every arm runs the same goal-manager code with the same `planning:` settings. Graph-enabled arms differ in one way only: Python adds learned-route summaries to the candidates and turns the chosen goal into a route waypoint. A test checks this.
 
 ## Candidate goals: the planner chooses, Python validates
 
@@ -55,7 +56,7 @@ Goals are checked after every skill, never per frame. Event payloads carry `goal
 | --- | --- | --- |
 | `no_goal` | hard | episode start, a level change, or no active goal |
 | `goal_achieved`, `goal_failed`, `goal_expired` | hard | lifecycle |
-| `death` | soft, latched | `death` event |
+| `death` | soft, latched | `death` event. A death also **ends the active goal** (`goal_failed`, reason `death`), because Dave respawns at the level start. That hard trigger replans at the respawn, inside any debounce window, so no stale goal or waypoint survives a death. |
 | `stuck` | soft | `Progress.stuck`: no progress for `planning.no_progress_frames` (a new goal restarts the clock) |
 | `repeated_failures` | soft | `planning.repeated_skill_failures` consecutive failed or interrupted skills **since the last plan** |
 | `inventory_changed` | soft, latched | the set of held items changed (not fuel draining or score) |
@@ -68,7 +69,7 @@ Goals are checked after every skill, never per frame. Event payloads carry `goal
 
 ### Calls, retries and fallback
 
-- **Validation:** `parse_plan` requires `{"goal": <offered id>, "rationale": str}` and nothing else.
+- **Validation:** `parse_plan` requires `{"goal": <offered id>, "rationale": str, "waypoints": [[col, row], ...]}`, where `waypoints` is optional with at most 5. The goal manager then checks every waypoint against the explored map (see "Map and waypoints").
 - **Rejected output:** a malformed or unknown answer is marked `invalid_output` and retried with the validation error as feedback, at most `models.max_retries` (1) times. Each attempt counts toward `planning.max_calls_per_episode` (30). A failed transport call is marked `error` or `timeout`. Every rejected or failed attempt emits a `model_failure` event with `purpose=planner`.
 - **No valid answer, or the cap is reached:**
   - on a soft trigger, the current goal is kept;
@@ -84,22 +85,57 @@ Goals are checked after every skill, never per frame. Event payloads carry `goal
 - **Recent skills:** the last `planning.recent_events` (8), with each skill's outcome, reason, events and end tile.
 - **Goals:** how the previous goal ended, and the current goal (on soft triggers).
 - **Candidates.**
-- **Graph arms only:** each candidate's `route` summary.
+- **Map:** the explored level map (`map`) and the planner's waypoints still ahead (`waypoints`). See "Map and waypoints".
+- **Graph arms only:** each candidate's `route` summary, with the deaths recorded on the route's platforms (`incidents`: cause, tile, skill; the newest 5).
 
 Arms A and B send identical requests (tested on the fixture and on the real game).
+
+## Map and waypoints
+
+**The map is what a human player has seen.** `control/level_map.py` renders every cell observed on the current level this episode (the goal manager's cell memory, reset on a level change): the current screen plus every screen seen before. Parts of the level not yet scrolled into view are `?`. The full map in game memory is never used, so the `local_observed` policy holds.
+
+```
+   00000000001111111111
+   01234567890123456789
+06 #.##.....#...T#.####
+07 #...@....#.#..#.....
+10 ###XXXXXX#XXXX#XXXXX
+```
+
+- **Fields:**
+  - `rows`: one string per map row, prefixed with its row number;
+  - `col_ruler`: two lines giving each column's tens and units digits;
+  - `origin`;
+  - `screen_cols`: the part on screen now;
+  - `legend`.
+- **Drawing:** the tactical legend, with Dave `@`, visible monsters `M` and shots `*` drawn over it. The planner's waypoints still ahead are drawn as `1`–`5`.
+- **The map is identical for every arm.**
+
+**Waypoints.** The planner may add up to 5 intermediate standing tiles `[col, row]`, in order, to its choice. The system prompt asks for them when the path is not a direct walk or single jump, and always on `stuck` or `repeated_failures`, for example "climb the left ledges first, then go right along the top".
+- **Validation:** each waypoint must be an explored empty cell directly above a `#`. Invalid ones are sent back as retry feedback (`invalid_output`). When the retries run out, the goal stands and only its valid waypoints are kept.
+- **Following:** the first waypoint becomes the goal's `next_waypoint`, ahead of the graph route and the reach estimate. When Dave stands on a waypoint's row within 1 column, it and any before it are dropped, and the next one takes over. When none are left, the route or reach waypoint resumes.
+- **Lifetime:** the queue clears when the goal ends (including on death or a level change). The no-progress clock measures distance to the current waypoint, so `stuck` follows the queue.
+- **Record:** `goal_set` records the accepted waypoints, and the inspector replays them.
 
 ## Azure planner (`--planner live`)
 
 - **Endpoint:** Chat Completions at `{AZURE_OPENAI_ENDPOINT}/openai/deployments/{AZURE_OPENAI_CHAT_DEPLOYMENT}/chat/completions?api-version={AZURE_OPENAI_API_VERSION}`, with an `api-key` header. Settings are checked before the game starts.
-- **Prompt:** the system prompt states only the rules verified in `docs/feasibility.md` §3, the planner's role and the output format, and asks for a brief rationale, not step-by-step reasoning. The user message is the `PlanningRequest` as JSON.
-- **Output:** `response_format` is a strict `json_schema` whose `goal` field is an enum of the offered ids. `reasoning_effort: low`, `max_completion_tokens: 2000`.
+- **Prompt:** the system prompt states:
+  - only the rules verified in `docs/feasibility.md` §3;
+  - the planner's role;
+  - how to read the map (standing cells, jump reach, deadly tiles);
+  - when to give waypoints;
+  - the output format.
+
+  It asks for a brief rationale, not step-by-step reasoning. The user message is the `PlanningRequest` as JSON.
+- **Output:** `response_format` is a strict `json_schema`: `goal` is an enum of the offered ids, and `waypoints` is an array of integer pairs (empty when not needed). `reasoning_effort: low`, `max_completion_tokens: 2000`.
 - **Transport retries:** timeouts, 408, 429 and 5xx are retried with exponential backoff up to `models.max_retries`. 4xx responses are not retried, and their messages are redacted.
 - **Logging:** usage tokens (prompt, completion, reasoning) are recorded. `cost_usd` stays null, because no price table is assumed. The `request_ref` is a hash of the body, and the `response_ref` is the response id.
 - **Verified 2026-10-03:** `gpt-5.4-mini`, api-version `2024-12-01-preview`. The strict schema and `reasoning_effort` are accepted, and a call takes about 1.3–1.6 s with about 600–1000 prompt tokens. The sanitized response is `tests/fixtures/azure/planner_response.json` (`scripts/probe_azure.py`).
 
 ## Graph-enabled arms: Python computes the route
 
-- **Route search:** when a goal is set, the target tile is mapped to its segment (`WorldGraph.node_at`; explore targets map to the cheapest reachable segment with an open side in that direction), and `find_route` runs from the segment Dave stands on.
+- **Route search:** when a goal is set, the target tile is mapped to its segment on the current level's graph (`GraphStore.for_level(level).node_at`;  explore targets map to the cheapest reachable segment with an open side in that direction), and `find_route` runs from the segment Dave stands on.
   - **Found:** `next_waypoint` is the next route node's cell nearest the final target, and a `RouteTracker` follows it.
   - **Unreachable:** the waypoint is the target tile itself. The candidate's route summary gives the reason (`no_verified_route`, `requires:trophy`, `unknown_start`, `target_not_on_known_segment`) and up to 3 frontier segments, so the planner can choose exploration or recovery explicitly.
 - **Following the route, with no LLM call:**
@@ -117,7 +153,13 @@ Arms A and B send identical requests (tested on the fixture and on the real game
 
 ## Known limitations
 
-- `stuck` uses distance to the waypoint. A mock tactical controller ignores goals, so mock runs mostly show `stuck` and expiry triggers. Goal-directed play starts with the Phase 7 LLM controller.
+- `stuck` uses distance to the waypoint. A mock tactical controller ignores goals, so mock runs mostly show `stuck` and expiry triggers. The live LLM controller (`--tactical live`) receives the goal and waypoint.
 - At fixture scale (41-frame episodes) the 60-frame debounce hides death triggers. Tests set it to 0. Calibrate all `planning:` values on Dave in Phase 9.
 - A planner re-choosing the same target on a soft trigger restarts its deadline. The call cap bounds this.
 - Explore targets are a direction and a column, not a verified reachable location.
+
+## Reachability waypoints (every arm)
+
+When the adapter has a `skills.reach` entry (Dave), the goal's `next_waypoint` is the **next landing spot** on an estimated route over the tiles observed this level (`control/reach.py`), not the far target. Graph-enabled arms keep their learned route whenever it has one. The waypoint is recomputed after every skill, and it is the target itself when no route is known or only walking is left. Each offered candidate's description also gets its estimated end tile, e.g. `estimated end tile [11, 7]`, or `(no movement)` / `estimated: no safe landing`. Every arm gets the same annotations, and the recorded candidate set and its digest are unchanged.
+
+The estimate simulates the catalog's own jump shapes with measured movement: the 95-tick jump arc, 1 px/tick air control and fall, 2 px per 3 ticks walking, and the foot and body offsets. It reproduces every real-game landing in `test_reach.py`. On level 1 its route (trophy via (4,7), (6,7), (9,5), (11,3); door via (16,7) and the gap at (17,9)) completes the level in the real game.

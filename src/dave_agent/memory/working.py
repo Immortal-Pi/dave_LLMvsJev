@@ -47,6 +47,25 @@ class HistoryEntry(Contract):
     def end_tile(self) -> TilePos | None:
         return player_tile(self.end_position) if self.end_position else None
 
+    @property
+    def moved_px(self) -> list[int] | None:
+        """Observed displacement [dx, dy] in pixels from the skill's start to its end ([0, 0]: Dave
+        did not move, e.g. walking into a wall or a jump blocked by the tile above)."""
+        if self.start_position is None or self.end_position is None:
+            return None
+        return [self.end_position.x - self.start_position.x, self.end_position.y - self.start_position.y]
+
+
+class Experience(Contract):
+    """What one skill did when started from one tile, over the whole episode. Unlike the recent
+    history it is not windowed, so it survives respawns."""
+
+    attempts: int = 0
+    deaths: int = 0  # a death event during the skill, or burning (death is then certain)
+    burned: int = 0  # interrupted by hazard_contact
+    no_move: int = 0  # moved_px == [0, 0]
+    last_end: TilePos | None = None
+
 
 class Motion(Contract):
     """Pixel displacement from the window start (or the last respawn) to now."""
@@ -102,6 +121,7 @@ class WorkingMemory:
         self._last_progress_frame = 0
         self._best_goal_distance: int | None = None
         self._consecutive_failures = 0
+        self._experience: dict[tuple[int, int], dict[str, Experience]] = {}
 
     @classmethod
     def from_config(cls, config: AppConfig) -> WorkingMemory:
@@ -126,6 +146,7 @@ class WorkingMemory:
         self.last_decision = None
         self._best_goal_distance = None
         self._consecutive_failures = 0
+        self._experience.clear()
         self._last_progress_frame = observation.frame
         self._visit(observation)
 
@@ -170,11 +191,16 @@ class WorkingMemory:
                 events=tuple(e.event_type for e in run.events if e.event_type not in _BOOKKEEPING_EVENTS),
             )
         )
+        self._remember(self._history[-1])
         while self._history[0].end_frame < end.frame - self.history_frames:
             self._history.popleft()
         self._consecutive_failures = self._consecutive_failures + 1 if run.outcome in FAILED_OUTCOMES else 0
         self.last_decision = decision
         self.latest = end
+
+    def experience(self, tile: TilePos) -> dict[str, Experience]:
+        """Per skill, what starting it from ``tile`` did earlier this episode (empty when untried)."""
+        return dict(self._experience.get((tile.col, tile.row), {}))
 
     def motion(self) -> Motion | None:
         latest = self._require()
@@ -228,6 +254,21 @@ class WorkingMemory:
         )
 
     # -- internals ------------------------------------------------------
+    def _remember(self, entry: HistoryEntry) -> None:
+        if entry.start_position is None:
+            return
+        start = player_tile(entry.start_position)
+        table = self._experience.setdefault((start.col, start.row), {})
+        old = table.get(entry.skill, Experience())
+        burned = entry.reason == "hazard_contact"
+        table[entry.skill] = Experience(
+            attempts=old.attempts + 1,
+            deaths=old.deaths + int(burned or "death" in entry.events),
+            burned=old.burned + int(burned),
+            no_move=old.no_move + int(entry.moved_px == [0, 0]),
+            last_end=entry.end_tile,
+        )
+
     def _require(self) -> Observation:
         if self.latest is None:
             raise ValueError("working memory is empty; call reset(observation) first")

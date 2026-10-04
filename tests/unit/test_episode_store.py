@@ -127,8 +127,8 @@ class _Failing:
         if self.calls == self.fail_at:
             raise RuntimeError("provider exploded")
         decision, _ = self.inner.decide(observation, goal, candidates, memory)
-        return decision, ModelCallRecord(provider="mock", model="failing", purpose="tactical", latency_ms=None,
-                                         status="error" if self.calls == 1 else "ok")
+        return decision, (ModelCallRecord(provider="mock", model="failing", purpose="tactical", latency_ms=None,
+                                          status="error" if self.calls == 1 else "ok"),)
 
 
 def test_model_failures_and_errored_episodes_are_logged(config, tmp_path):

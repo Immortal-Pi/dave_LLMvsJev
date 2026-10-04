@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -19,7 +19,7 @@ from typing import Any
 from dave_agent.control.skills import CandidateSet, ExecutionResult
 from dave_agent.schemas import Decision, Event, ModelCallRecord, Observation
 
-STORE_SCHEMA_VERSION = 1
+STORE_SCHEMA_VERSION = 2  # 2: decisions.context_digest, model_calls.output_json
 
 _SCHEMA = """
 CREATE TABLE runs (
@@ -73,6 +73,7 @@ CREATE TABLE model_calls (
     cost_source TEXT,
     request_ref TEXT,
     response_ref TEXT,
+    output_json TEXT,                   -- provider answer details as reported (e.g. Jev probabilities)
     PRIMARY KEY (episode_key, seq)
 );
 CREATE TABLE decisions (
@@ -89,6 +90,7 @@ CREATE TABLE decisions (
     candidate_ids_json TEXT NOT NULL,
     masked_json TEXT NOT NULL,
     candidate_digest TEXT NOT NULL,
+    context_digest TEXT,                -- digest of the shared tactical request; NULL when forced
     model_call_seq INTEGER,
     PRIMARY KEY (episode_key, seq),
     FOREIGN KEY (episode_key, observation_id) REFERENCES observations(episode_key, observation_id),
@@ -133,10 +135,10 @@ _TABLE_ORDER = ("observations", "model_calls", "decisions", "skill_executions", 
 _COLUMNS = {
     "observations": ("episode_key", "observation_id", "frame", "observation_json"),
     "model_calls": ("episode_key", "seq", "provider", "model", "purpose", "status", "latency_ms", "retries",
-                    "usage_json", "cost_usd", "cost_source", "request_ref", "response_ref"),
+                    "usage_json", "cost_usd", "cost_source", "request_ref", "response_ref", "output_json"),
     "decisions": ("episode_key", "seq", "observation_id", "frame", "candidate_id", "goal_id", "forced",
                   "fallback", "provider_score", "provider_score_meaning", "candidate_ids_json", "masked_json",
-                  "candidate_digest", "model_call_seq"),
+                  "candidate_digest", "context_digest", "model_call_seq"),
     "skill_executions": ("episode_key", "decision_seq", "candidate_id", "skill", "outcome", "reason", "frames",
                          "input_ticks", "start_observation_id", "end_observation_id"),
     "events": ("episode_key", "seq", "frame", "event_type", "certainty", "location_col", "location_row",
@@ -282,11 +284,14 @@ class EpisodeRecorder:
         self.flush()
 
     def record(self, observation: Observation, offered: CandidateSet, decision: Decision,
-               call: ModelCallRecord | None, run: ExecutionResult, events: list[Event]) -> None:
+               calls: Sequence[ModelCallRecord], run: ExecutionResult, events: list[Event]) -> None:
         """One decision point: the observation it was made on, what was offered, the choice,
-        the model call (None when forced), the execution and every event during it."""
+        every model call made for it (none when forced; retries included), the execution and
+        every event during it. ``model_call_seq`` links the decision to its last call."""
         key = self._key()
-        call_seq = None if call is None else self._call(call)
+        call_seq = None
+        for call in calls:
+            call_seq = self._call(call)
         seq = self._decision_seq
         self._decision_seq += 1
         self._observation(observation)
@@ -294,7 +299,7 @@ class EpisodeRecorder:
             (key, seq, observation.observation_id, observation.frame, decision.candidate_id, decision.goal_id,
              int(decision.forced), int(decision.fallback), decision.provider_score,
              decision.provider_score_meaning, _json(list(offered.ids)), _json(offered.masked), offered.digest(),
-             call_seq)
+             decision.context_digest, call_seq)
         )
         self._observation(run.observation)
         self._pending["skill_executions"].append(
@@ -341,7 +346,7 @@ class EpisodeRecorder:
         self._pending["model_calls"].append(
             (self._key(), seq, call.provider, call.model, call.purpose, call.status, call.latency_ms, call.retries,
              None if call.usage is None else _json(call.usage), call.cost_usd, call.cost_source, call.request_ref,
-             call.response_ref)
+             call.response_ref, None if call.output is None else _json(call.output))
         )
         return seq
 

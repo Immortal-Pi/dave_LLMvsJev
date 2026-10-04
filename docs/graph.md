@@ -4,11 +4,19 @@ The code is in `src/dave_agent/memory/`:
 
 | File | Contents |
 | --- | --- |
-| `graph.py` | `WorldGraph`, segmentation and evidence updates |
+| `graph.py` | `WorldGraph` (one level), `GraphStore` (one graph per level), segmentation and evidence updates |
 | `routes.py` | `find_route`, `RouteTracker` |
-| `persistence.py` | JSON checkpoints and the YAML export |
+| `persistence.py` | JSON checkpoints, per-level stores and the YAML export |
 
-The graph is a NetworkX `MultiDiGraph`. It is used only by graph-enabled arms (C, D), and in Phase 5 it is learned and stored but not read during an episode. The Phase 6 planner will consume routes. A test shows that controllers see identical inputs with or without the graph.
+## One graph per level
+
+A `GraphStore` holds one `WorldGraph` per `level_id`, created when the level is first seen. The episode loop and the goal manager use the store like a graph, and every call is routed by the observation's `level_id`:
+- `observe`, `record_execution` and `skill_evidence` go to the current level's graph;
+- the goal manager plans on `store.for_level(level)`.
+
+So no node, edge, frontier or route spans two levels. Before the split, level-1 frontier nodes appeared in level-2 route summaries. A `WorldGraph` created by a store asserts its level: observing another level raises `ValueError`. A skill that ends on another level (`record_execution` sees two `level_id`s) is recorded as `level_changed`, never as an edge; the new level's first view goes into its own graph.
+
+Each level's graph is a NetworkX `MultiDiGraph`. It is used only by graph-enabled arms (C, D), and in Phase 5 it is learned and stored but not read during an episode. The Phase 6 planner will consume routes. A test shows that controllers see identical inputs with or without the graph.
 
 ## Nodes: platform segments (deterministic segmentation)
 
@@ -29,6 +37,7 @@ The graph is a NetworkX `MultiDiGraph`. It is used only by graph-enabled arms (C
   | `inconclusive` | completed skills that ended airborne or off-map |
   | `failed_attempts` | failures whose target cannot be identified |
   | evidence | refs `episode_key#observation_id`; the newest 20 are kept, plus a full count |
+  | `incidents` | deaths of skills started here: `{skill, cause, tile, ref}`, the newest 20 |
   | `last_verified_frame` | last frame the node was confirmed |
 
 - **Where Dave stands** (`locate`): Dave must be grounded and standing or walking. Use the segment under Dave's centre tile. Dave's hitbox is 20 px, so if that tile matches no segment, try the neighbouring columns.
@@ -50,8 +59,10 @@ The graph is a NetworkX `MultiDiGraph`. It is used only by graph-enabled arms (C
 - **Raw counts:** each edge stores `attempts`, `successes`, `failures`, `fatal` and `frames_total`.
   - `fatal` (a death or `hazard_contact`) is counted separately: not every failure is a death risk.
   - Success uses the Laplace prior `(successes+1)/(attempts+2)`, so an untried edge is 0.5, never certain.
+- **Incidents:** a fatal skill also leaves an incident on its start node. `cause` is what touched Dave on his first burning frame (`control/threats.py` `contact_cause`): `plasma`, a monster type, the hazard tile's name, or `unknown`; `tile` is where. Route summaries for the planner list the incidents on a route's platforms (`docs/planner.md`), so the graph remembers where plasma or fire killed Dave.
 - **Inventory context:** the items held (value > 0) when the skill started. It keeps a macro's reliability from mixing situations with and without the gun or trophy.
 - **No edge is ever created to an unseen destination.**
+- **Shown to the tactical model:** `skill_evidence(obs)` sums, per skill, the attempts, successes and fatal counts over the out-edges of Dave's segment with the same held items, plus that segment's `failed_attempts`, and names the segment most often reached. Graph-enabled arms see it as a "past runs" note on each candidate (`docs/memory.md`, "Experience notes"). It comes from the graph as it was at episode start.
 - **Suggestions:** model or planner suggestions (`suggest(...)`) are kept in a separate list. They never create nodes or edges, and route search ignores them.
 
 ## Route search
@@ -74,22 +85,25 @@ The graph is a NetworkX `MultiDiGraph`. It is used only by graph-enabled arms (C
 
 ## Checkpoints
 
-- **Format:** versioned JSON (`graph_schema_version: 1`). It holds:
-  - adapter, build_id, observation_policy, scenarios;
+- **Store layout:** a store is a directory with one checkpoint per level, `<dir>/<level_id>.json`. A store path written `X.json` means the directory `X/`. A legacy combined checkpoint at `X.json` (one graph for all levels) is split by node `level_id` on load: edges are kept only between nodes of the same level. It is then written back as the directory, so earlier learning is kept.
+- **Format** (one level): versioned JSON (`graph_schema_version: 1`). It holds:
+  - adapter, build_id, observation_policy, `level_id`, scenarios;
   - lineage: `[{run_id, episode_key, arm, scenario_id}]`, plus `parent_sha256` of the checkpoint it was loaded from;
   - counts, aliases, nodes, edges and suggestions.
 
   The JSON is sorted, so identical learning gives byte-identical files (tested on the real game).
-- **Atomic save:** write `<path>.tmp` and fsync it, copy the current file to `<path>.bak`, then `os.replace`. An interrupted save leaves the previous checkpoint intact (tested).
+- **Atomic save:** for each level file, write `<path>.tmp` and fsync it, copy the current file to `<path>.bak`, then `os.replace`. An interrupted save leaves the previous checkpoint intact (tested). Lineage is added to every level in the store at save time.
 - **Load:** a schema, adapter, build or observation-policy mismatch is rejected with `GraphCheckpointError`. Learned routes do not transfer across builds.
-- **YAML:** `export_yaml` is for inspection only.
-- **Per-arm files:** `dave-agent play --arm C` loads or creates `artifacts/graphs/arm-C/<adapter>.json`, or `--graph PATH` / `memory.graph_checkpoint` if set. It learns when `memory.graph_updates` is true, then saves. Use one file per arm and trial; arms A and B never create or read one.
+- **YAML:** `export_yaml` (one level) and `export_store_yaml` (every level) are for inspection only.
+- **Per-arm stores:** `dave-agent play --arm C` loads or creates `artifacts/graphs/arm-C/<adapter>/` (`level1.json`, `level2.json`, …), or `--graph PATH` / `memory.graph_checkpoint` if set. It learns when `memory.graph_updates` is true, then saves. Use one store per arm and trial; arms A and B never create or read one.
 
 ```bash
 uv run dave-agent play --arm C --mock --adapter dave --scenario level1
-uv run dave-agent graph --checkpoint artifacts/graphs/arm-C/dave.json --yaml artifacts/graphs/arm-C/dave.yaml
-uv run dave-agent graph --checkpoint artifacts/graphs/arm-C/dave.json --route level1:r9:c2 level1:r7:c4 [--items trophy]
+uv run dave-agent graph --checkpoint artifacts/graphs/arm-C/dave --yaml artifacts/graphs/arm-C/dave.yaml
+uv run dave-agent graph --checkpoint artifacts/graphs/arm-C/dave --route level1:r9:c2 level1:r7:c4 [--items trophy]
 ```
+
+`graph` reports the totals, `per_level` counts, and routes on the level named by the node ids.
 
 ## Known limitations
 

@@ -24,7 +24,8 @@ TypeSafe's **System One models** (Jev) are reached through OpenRouter. Two acces
   `usage{input_tokens, output_tokens, cost}`, `id`, `provider`. The response `model` is a
   dated version, e.g. `typesafe/jev-1.13-20260917`.
 - `confidence` describes how concentrated `probabilities` is; it is not a correctness score.
-- The harness parser is `src/dave_agent/models/jev.py`. Re-run `scripts/probe_jev.py` to refresh the contract fixture.
+- `state` may be a string, an object or an array. The harness sends an object (see `docs/tactical.md`).
+- The harness client, parser and tactical model are in `src/dave_agent/models/jev.py`. `scripts/probe_jev.py` refreshes the minimal contract fixture `tests/fixtures/jev/choice_response.json`; `dave-agent probe-provider --provider jev --save-fixture` captures a real tactical request and response in `tests/fixtures/jev/tactical_response.json`.
 
 ```python
 payload = {

@@ -14,7 +14,7 @@ Replay lives in `src/dave_agent/runner/replay.py`. Learned graph memory is Phase
 
 `WorkingMemory` is a typed Python object built only from observations and executions, with no database access. The runner calls:
 - `reset(observation)` at every episode start;
-- `record(decision, execution)` after every skill;
+- `record(decision, execution)` after every skill (the episode recorder's `record` also takes every model call made for the decision, retries included; see `docs/tactical.md`);
 - `context()` before every model call.
 
 The goal manager (`docs/planner.md`) calls `set_goal(goal)` for a new goal, which restarts the no-progress clock. It calls `set_goal(goal, restart_clock=False)` when only the route waypoint moves.
@@ -27,6 +27,7 @@ Every arm builds the identical memory, which `tests/unit/test_arm_parity.py` ass
 | Recent history | A deque of `HistoryEntry`, one per executed skill. Each entry holds: start/end frame and observation ids, candidate, skill, forced, outcome, reason, start/end position, end state, and the event types during the skill. Entries older than `memory.recent_history_frames` before the latest frame are dropped, and the deque never exceeds `memory.max_history_entries`. |
 | Derived motion | `motion()`: the pixel displacement from the window start, or from the last death or respawn, to now, plus the adapter's `player_velocity` |
 | Progress | `progress()`: see the next table |
+| Experience | `experience(tile)`: per skill, what starting it from that tile did **this episode**: attempts, deaths (a death event, or `hazard_contact`), `burned`, `no_move` (`moved_px == [0, 0]`) and the last end tile. It is not windowed and survives respawns, so after a death Dave's next visit to the tile shows what killed him. `reset` clears it. It reaches the models only as candidate notes (see "Experience notes"). |
 
 | `progress()` field | Meaning |
 | --- | --- |
@@ -44,7 +45,21 @@ Every arm builds the identical memory, which `tests/unit/test_arm_parity.py` ass
 **`MemoryContext`** is the only memory a controller receives. It is passed as `decide(observation, goal, candidates, memory)`.
 - It is deterministic and bounded: the latest entry, motion, progress and the last `memory.context_entries` (8) entries.
 - It never contains a transcript or anything from the episode store.
-- Mock controllers ignore it. The live LLM and Jev controllers (Phases 7–8) will render it into their requests.
+- Mock controllers ignore it. The live LLM and Jev models get it through the shared tactical request (`docs/tactical.md`).
+
+### Experience notes
+
+Before every model decision (`control/experience.py`, called from `run_episode`), each offered candidate that was tried before gets notes appended to its description. The notes come before the reach estimate:
+- **every arm:** `this episode from here: 2x, 2 died (burned), last end [3,9]` (working-memory experience for Dave's tile);
+- **graph-enabled arms:** `past runs from this platform: 5x, 3 ok, 2 fatal, lands row 7 cols 4-9` (`WorldGraph.skill_evidence`). It is read from a copy of the graph taken at episode start, so this episode is never counted twice. A frozen warm checkpoint gives the same notes in every trial.
+
+Rules:
+- An untried skill is unchanged. Descriptions stay capped at 200 characters.
+- Notes only inform: nothing is masked, and the controller still chooses.
+- The offered set and its digest are computed before the notes, so replay and parity checks are unaffected.
+- Mock controllers ignore descriptions, so the offline traces are unchanged.
+
+Why: Jev answers the same request the same way. Without the notes, Dave returning to a tile after a respawn saw exactly the request that led to his death, and repeated the fatal move.
 
 Limits: the 120-frame window is fixture-scale. A Dave jump takes 94 frames, so on Dave the window holds only a few entries. Tune it with the planner (Phase 6).
 
@@ -62,7 +77,7 @@ The goal manager emits `goal_set`, `goal_achieved` and `goal_failed` (`certainty
 
 ## Episode store (SQLite)
 
-The store lives at `memory.episode_store` (default `artifacts/events.sqlite`, gitignored). It uses only the standard-library `sqlite3`, with `PRAGMA foreign_keys = ON`. The schema version is held in `PRAGMA user_version` (currently 1):
+The store lives at `memory.episode_store` (default `artifacts/events.sqlite`, gitignored). It uses only the standard-library `sqlite3`, with `PRAGMA foreign_keys = ON`. The schema version is held in `PRAGMA user_version` (currently 2; version 2 added `decisions.context_digest` and `model_calls.output_json`):
 - a store with any other version is refused with an actionable error;
 - so is a non-store SQLite file.
 
@@ -71,8 +86,8 @@ The store lives at `memory.episode_store` (default `artifacts/events.sqlite`, gi
 | `runs` | `run_id` | `mode` (`mock` / `live`), command, full config JSON |
 | `episodes` | `episode_key` = `run_id/episode_id` | → runs. It holds arm, controller label, adapter, build, scenario, seed, outcome, `termination_reason`, frames, score, lives, deaths, decisions and model calls. `outcome` stays NULL if the process dies mid-episode. |
 | `observations` | (episode, `observation_id`) | the full `Observation` JSON. Only decision-point observations (the start and end of each skill) are stored. |
-| `model_calls` | (episode, seq) | provider, model, purpose, status, latency, retries, usage, cost and cost source, and sanitized request/response refs |
-| `decisions` | (episode, seq) | → the observation it was made on, and → its model call (NULL when forced). It also holds the offered candidate ids, the mask and the digest. |
+| `model_calls` | (episode, seq) | provider, model, purpose, status, latency, retries, usage, cost and cost source, sanitized request/response refs, and `output` (provider answer details as reported, e.g. Jev probabilities and confidence; NULL otherwise) |
+| `decisions` | (episode, seq) | → the observation it was made on, and → its model call (NULL when forced). It also holds the offered candidate ids, the mask, the candidate digest and the `context_digest` of the tactical request (NULL when forced). |
 | `skill_executions` | (episode, decision seq) | → its decision, and → its start and end observations. It holds outcome, reason, frames and input ticks. |
 | `events` | (episode, seq) | every adapter, executor and derived event in order, → the skill execution it occurred during (NULL for episode-level events) |
 

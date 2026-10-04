@@ -97,7 +97,7 @@ TypeSafe also offers its own endpoint, `POST https://api.typesafe.ai/v1/systemon
 
 ## 5. LLM provider
 
-The planner and the LLM tactical controller use **Azure OpenAI**. Variable names are listed in `.env.example`, and the deployment is read from `AZURE_OPENAI_CHAT_DEPLOYMENT`. No Azure calls were made in Phase 0, so the contract will be verified in Phase 7.
+The planner and the LLM tactical controller use **Azure OpenAI**. Variable names are listed in `.env.example`, and the deployment is read from `AZURE_OPENAI_CHAT_DEPLOYMENT`. No Azure calls were made in Phase 0. The contract (Chat Completions, strict `json_schema`, `reasoning_effort`) was verified live in Phases 6 and 7; see `docs/planner.md` and `docs/tactical.md`.
 
 ## 6. Observation policy
 
