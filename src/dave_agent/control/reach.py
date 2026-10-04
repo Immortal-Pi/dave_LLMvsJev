@@ -48,11 +48,17 @@ class ReachMap:
     def _box_cells(self, x: int, y: int) -> set[Cell]:
         left, right = self.cfg.body_px
         cols = {(x + left) // TILE, (x + right) // TILE}
-        rows = {y // TILE, (y + TILE - 1) // TILE}
+        rows = {(y + 2) // TILE, (y + TILE - 1) // TILE}  # the game's side checks: y+2 and y+15 (dave.c)
         return {(c, r) for c in cols for r in rows}
 
     def _blocked(self, x: int, y: int) -> bool:
         return any(self.cells.get(c) is None or self.cells[c] in BLOCKING for c in self._box_cells(x, y))
+
+    def _head_blocked(self, x: int, y: int) -> bool:
+        """The game's top check (dave.c ``dave_collision_top``) with Dave's top at pixel y: the
+        head points at x + ``head_px`` one pixel below the top."""
+        return any(self.cells.get(((x + dx) // TILE, (y + 1) // TILE)) in (None, *BLOCKING)
+                   for dx in self.cfg.head_px)
 
     def _deadly(self, x: int, y: int) -> bool:
         return any(self.cells.get(c) in DEADLY for c in self._box_cells(x, y))
@@ -81,11 +87,23 @@ class ReachMap:
     def fly(self, start: Cell, direction: int, hold: int | None) -> Cell | None:
         """Landing cell of a jump from standing at ``start``: direction held for ``hold`` ticks
         (None: until landing; 0 or direction 0: straight up). None when it lands nowhere safe."""
+        return self.trace(start[0] * TILE, start[1] * TILE, direction, hold)[1]
+
+    def trace(self, x: int, y0: int, direction: int, hold: int | None,
+              stop_on_hazard: bool = True) -> tuple[list[tuple[int, int]], Cell | None]:
+        """Dave's pixel position after every tick of a jump from standing at pixel (x, y0), and
+        the landing cell (None when it lands nowhere safe). ``stop_on_hazard`` off flies through
+        hazard cells, for callers that test contact with the game's smaller hazard boxes. Once the
+        arc ends in the air (or a ceiling cuts it) Dave free-falls; a direction pressed during the
+        fall turns him, and from then on he drifts that way with no key held (dave.c)."""
         arc, cfg = self.cfg.arc_px, self.cfg
-        x, y0 = start[0] * TILE, start[1] * TILE
-        y, peak, falling = y0, 0, False
+        start = _cell(x, y0)
+        drifting = False
+        y, falling = y0, False
+        path: list[tuple[int, int]] = []
         for t in range(1, MAX_FLIGHT_TICKS):
-            if direction and (hold is None or t <= hold):
+            held = bool(direction) and (hold is None or t <= hold)
+            if held:
                 for _ in range(cfg.air_px_per_tick):
                     if not self._blocked(x + direction, y):
                         x += direction
@@ -93,25 +111,61 @@ class ReachMap:
                 target = y0 - arc[t]
                 step = -1 if target < y else 1
                 while y != target:
-                    if step < 0 and self._blocked(x, y - 1):
+                    # The game tests the head 2 px ahead when a direction is held and only stops the
+                    # jump when that is blocked too, so a jump slips past a ledge corner.
+                    if step < 0 and self._head_blocked(x, y - 1) and (
+                            not held or self._head_blocked(x + 2 * direction, y - 1)):
                         falling = True  # head hit the tile above: fall from here
                         break
                     if step > 0 and self._supported(x, y):
-                        return self._ground(x, y)
+                        path.append((x, y))
+                        return path, self._ground(x, y)
                     y += step
-                peak = max(peak, y0 - y)
             else:
                 falling = True
+                drifting = drifting or held
+                if drifting and not held:
+                    for _ in range(cfg.air_px_per_tick):
+                        if not self._blocked(x + direction, y):
+                            x += direction
                 for _ in range(cfg.fall_px_per_tick):
                     if self._supported(x, y):
-                        return self._ground(x, y)
+                        path.append((x, y))
+                        return path, self._ground(x, y)
                     y += 1
-            if self._deadly(x, y) or y > (self.max_row + 1) * TILE:
-                return None
+            path.append((x, y))
+            if (stop_on_hazard and self._deadly(x, y)) or y > (self.max_row + 1) * TILE:
+                return path, None
             descending = falling or (t < len(arc) and arc[t] <= arc[t - 1] and t > 1)
             if descending and self._supported(x, y) and _cell(x, y) != start:
-                return self._ground(x, y)
-        return None
+                return path, self._ground(x, y)
+        return path, None
+
+    def walk(self, x: int, y: int, direction: int, ticks: int, facing: int = 0) -> list[tuple[int, int]]:
+        """Dave's pixel position after every tick of walking ``ticks`` ticks (``walk_px_per_3_ticks``
+        along the floor, stopped by walls). Off an edge he falls 1 px/tick and moves
+        ``air_px_per_tick`` the way he faces: a held key turns him, and once turned he keeps
+        drifting with no key held (dave.c freefalling). ``facing`` (-1, 0 or 1) is a drift
+        already under way when the walk starts."""
+        path: list[tuple[int, int]] = []
+        moved = 0
+        drift = direction or facing
+        for t in range(1, ticks + 1):
+            due = t * self.cfg.walk_px_per_3_ticks // 3
+            airborne = not self._supported(x, y)
+            step, way = (self.cfg.air_px_per_tick, drift) if airborne else (due - moved, direction)
+            if way and step > 0:
+                for _ in range(step):
+                    if not self._blocked(x + way, y):
+                        x += way
+            moved = due
+            if not self._supported(x, y) and y <= (self.max_row + 1) * TILE:
+                for _ in range(self.cfg.fall_px_per_tick):
+                    if self._supported(x, y):
+                        break
+                    y += 1
+            path.append((x, y))
+        return path
 
     def moves(self, cell: Cell) -> list[tuple[Cell, str, float]]:
         """(landing cell, kind, cost) for every estimated move from a standable cell."""
@@ -225,6 +279,34 @@ def estimate_end(reach: ReachMap, cell: Cell, spec: SkillSpec) -> Cell | None:
                 r += 1
             return (col, r) if reach.standable((col, r)) else None
     return (col, row)
+
+
+def trace_skill(reach: ReachMap, x: int, y: int, spec: SkillSpec, facing: int = 0) -> list[tuple[int, int]]:
+    """Estimated pixel position after every tick of ``spec`` from pixel (x, y), standing or
+    falling, read from the skill's phases like ``estimate_end``; hazard cells do not stop it
+    (callers test contact). A skill that presses no direction or jump keeps a standing Dave where
+    he is; a falling one drifts the way he is turned (``facing`` -1, 0 or 1; 0 for no drift)."""
+    phases = spec.phases
+    if "jump" in phases[0].buttons:
+        direction, hold = 0, 0
+        for phase in phases[1:]:
+            d = next((DIRECTIONS[b] for b in phase.buttons if b in DIRECTIONS), 0)
+            if d:
+                direction = d
+                hold = None if phase.until is not None else hold + (phase.ticks or 0)
+        path = reach.trace(x, y, direction, hold, stop_on_hazard=False)[0] or [(x, y)]
+        if hold and len(path) < hold:
+            # Landed early (a ceiling stopped the jump): the direction is still held, so he walks.
+            path += reach.walk(*path[-1], direction, hold - len(path), direction)
+        return path
+    direction = next((DIRECTIONS[b] for p in phases for b in p.buttons if b in DIRECTIONS), 0)
+    # Walks and waits; in the air (free fall) the same walk steers and falls.
+    path = reach.walk(x, y, direction, spec.max_frames, facing) or [(x, y)]
+    if not reach._supported(*path[-1]):
+        # The skill ends in the air: with no further input he keeps falling, drifting the way he
+        # now faces, until he lands. A walk off a ledge is judged by where that fall ends.
+        path += reach.walk(*path[-1], 0, MAX_FLIGHT_TICKS, direction or facing)
+    return path
 
 
 def iter_jumps(reach: ReachMap, cell: Cell) -> Iterable[tuple[str, Cell | None]]:

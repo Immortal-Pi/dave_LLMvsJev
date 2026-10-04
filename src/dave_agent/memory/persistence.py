@@ -1,5 +1,10 @@
 """Versioned JSON checkpoints for the learned world graph, plus a YAML inspection export.
 
+A ``GraphStore`` (one graph per level) is a directory with one checkpoint per level,
+``<dir>/<level_id>.json``. A store path given as ``X.json`` means the directory ``X/``; a legacy
+combined checkpoint at ``X.json`` (one graph for every level) is split by level on load and
+written back as a directory, so earlier learning is kept.
+
 Saving is atomic: the new checkpoint is written to ``<path>.tmp`` and fsynced, the current
 file is copied to ``<path>.bak``, and only then is the temp file renamed over ``<path>``. An
 interrupted save therefore leaves the previous valid checkpoint in place. Loading rejects a
@@ -17,7 +22,7 @@ from typing import Any
 
 import yaml
 
-from dave_agent.memory.graph import WorldGraph
+from dave_agent.memory.graph import GraphStore, WorldGraph
 
 GRAPH_SCHEMA_VERSION = 1
 
@@ -32,6 +37,7 @@ def to_checkpoint(graph: WorldGraph) -> dict[str, Any]:
         "adapter": graph.adapter,
         "build_id": graph.build_id,
         "observation_policy": graph.observation_policy,
+        "level_id": graph.level_id,
         "scenarios": sorted(graph.scenarios),
         "lineage": graph.lineage,
         "parent_sha256": graph.parent_sha256,
@@ -47,7 +53,8 @@ def to_checkpoint(graph: WorldGraph) -> dict[str, Any]:
 
 
 def from_checkpoint(data: dict[str, Any]) -> WorldGraph:
-    graph = WorldGraph(data["adapter"], data["build_id"], data["observation_policy"], data["evidence_limit"])
+    graph = WorldGraph(data["adapter"], data["build_id"], data["observation_policy"], data["evidence_limit"],
+                       data.get("level_id"))
     graph.scenarios = set(data["scenarios"])
     graph.lineage = list(data["lineage"])
     graph.parent_sha256 = data["parent_sha256"]
@@ -114,4 +121,76 @@ def export_yaml(graph: WorldGraph, path: Path | str) -> Path:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(yaml.safe_dump(to_checkpoint(graph), sort_keys=True, allow_unicode=True), encoding="utf-8")
+    return path
+
+
+# -- per-level stores ------------------------------------------------------------------------
+def store_dir(path: Path | str) -> Path:
+    """The directory of a graph store: ``X.json`` names the directory ``X``."""
+    path = Path(path)
+    return path.with_suffix("") if path.suffix == ".json" else path
+
+
+def store_exists(path: Path | str) -> bool:
+    path = Path(path)
+    return store_dir(path).is_dir() or (path.suffix == ".json" and path.is_file())
+
+
+def save_store(store: GraphStore, path: Path | str) -> Path:
+    """One atomic checkpoint per level in the store's directory; returns the directory."""
+    directory = store_dir(path)
+    directory.mkdir(parents=True, exist_ok=True)
+    for level_id, graph in sorted(store.levels.items()):
+        save_checkpoint(graph, directory / f"{level_id}.json")
+    return directory
+
+
+def split_levels(graph: WorldGraph) -> GraphStore:
+    """A legacy all-levels graph as one graph per level: nodes by their ``level_id``, edges only
+    between nodes of the same level, suggestions by level; lineage and counters are copied."""
+    store = GraphStore(graph.adapter, graph.build_id, graph.observation_policy, graph.evidence_limit)
+    for node, data in graph.g.nodes(data=True):
+        store.for_level(data["level_id"]).g.add_node(node, **data)
+    for u, v, key, data in graph.g.edges(keys=True, data=True):
+        level = graph.g.nodes[u]["level_id"]
+        if graph.g.nodes[v]["level_id"] == level:
+            store.levels[level].g.add_edge(u, v, key=key, **data)
+    for level_id, part in store.levels.items():
+        part.aliases = {a: t for a, t in graph.aliases.items() if a.startswith(f"{level_id}:")}
+        part.suggestions = [s for s in graph.suggestions if s["level_id"] == level_id]
+        part.scenarios, part.lineage = set(graph.scenarios), list(graph.lineage)
+        part.parent_sha256, part.topology_version = graph.parent_sha256, graph.topology_version
+    return store
+
+
+def load_store(path: Path | str, adapter: str | None = None, build_id: str | None = None,
+               observation_policy: str | None = None) -> GraphStore:
+    """Load a store directory, or split a legacy combined checkpoint; expectations as for
+    ``load_checkpoint``, checked on every level."""
+    path = Path(path)
+    directory = store_dir(path)
+    if directory.is_dir():
+        files = sorted(directory.glob("*.json"))
+        if not files:
+            raise GraphCheckpointError(f"graph store {directory} holds no level checkpoints")
+        first = load_checkpoint(files[0], adapter, build_id, observation_policy)
+        store = GraphStore(first.adapter, first.build_id, first.observation_policy, first.evidence_limit)
+        for file in files:
+            graph = first if file == files[0] else load_checkpoint(file, adapter, build_id, observation_policy)
+            level_id = graph.level_id or file.stem
+            if graph.level_id is None:  # a single-level checkpoint written before levels were split
+                graph.level_id = level_id
+            store.levels[level_id] = graph
+        return store
+    if path.suffix == ".json" and path.is_file():
+        return split_levels(load_checkpoint(path, adapter, build_id, observation_policy))
+    raise GraphCheckpointError(f"graph store not found: {directory} (or a legacy {directory}.json)")
+
+
+def export_store_yaml(store: GraphStore, path: Path | str) -> Path:
+    """Human-readable export of every level, for inspection only."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = {level: to_checkpoint(graph) for level, graph in sorted(store.levels.items())}
+    path.write_text(yaml.safe_dump(data, sort_keys=True, allow_unicode=True), encoding="utf-8")
     return path

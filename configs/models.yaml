@@ -5,11 +5,16 @@ models:
     deployment_env: AZURE_OPENAI_CHAT_DEPLOYMENT
     max_completion_tokens: 2000   # includes reasoning tokens
     reasoning_effort: low         # verified accepted by gpt-5.4-mini (2026-10-03)
+    # Azure reports no cost. Fill in your deployment's prices to get *estimated* costs and a
+    # working paid-run ceiling, e.g. {input_per_mtok: 0.0, output_per_mtok: 0.0, source: "<price page URL>",
+    # as_of: "YYYY-MM-DD"}. null: cost unknown (a live benchmark then needs --allow-unpriced).
+    price: null
   tactical_llm:
     provider: azure_openai
     deployment_env: AZURE_OPENAI_CHAT_DEPLOYMENT
     max_completion_tokens: 2000
     reasoning_effort: low
+    price: null                   # see planner.price
   jev:
     provider: openrouter_decisions
     endpoint: https://openrouter.ai/api/alpha/decisions

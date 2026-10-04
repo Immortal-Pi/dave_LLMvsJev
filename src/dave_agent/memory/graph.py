@@ -19,6 +19,7 @@ from typing import Any
 import networkx as nx
 
 from dave_agent.control.skills import ExecutionResult
+from dave_agent.control.threats import contact_cause
 from dave_agent.memory.working import player_tile
 from dave_agent.schemas import Observation
 
@@ -62,9 +63,14 @@ def segments(obs: Observation) -> list[dict[str, Any]]:
 
 
 class WorldGraph:
-    def __init__(self, adapter: str, build_id: str, observation_policy: str, evidence_limit: int = 20) -> None:
+    """The learned graph of one level. ``level_id`` None accepts any level (tests and legacy
+    checkpoints); a ``GraphStore`` always sets it, so observing another level is a bug."""
+
+    def __init__(self, adapter: str, build_id: str, observation_policy: str, evidence_limit: int = 20,
+                 level_id: str | None = None) -> None:
         self.adapter, self.build_id, self.observation_policy = adapter, build_id, observation_policy
         self.evidence_limit = evidence_limit
+        self.level_id = level_id
         self.g = nx.MultiDiGraph()
         self.aliases: dict[str, str] = {}
         self.suggestions: list[dict[str, Any]] = []
@@ -90,6 +96,8 @@ class WorldGraph:
     def observe(self, obs: Observation) -> None:
         """Fold the observation's platform segments and items into the graph, and mark the
         segment Dave stands on as visited. Re-segments only when the view or tiles changed."""
+        if self.level_id is not None and obs.level_id != self.level_id:
+            raise ValueError(f"graph of {self.level_id} cannot observe {obs.level_id}")
         signature = (obs.level_id, obs.region, obs.tiles)
         if signature != self._last_signature:
             self._last_signature = signature
@@ -118,7 +126,7 @@ class WorldGraph:
             self.g.add_node(node, level_id=level, row=row, col_min=seg["col_min"], col_max=seg["col_max"],
                             open_left=seg["open_left"], open_right=seg["open_right"], surface="solid",
                             visited=False, items=[], stays=0, inconclusive=0, failed_attempts={},
-                            evidence=[], evidence_count=0, last_verified_frame=obs.frame)
+                            evidence=[], evidence_count=0, incidents=[], last_verified_frame=obs.frame)
             self.topology_version += 1
             return
         keep, *others = touching  # node iteration order is creation order: the oldest id survives
@@ -152,6 +160,7 @@ class WorldGraph:
         for key, rec in b["failed_attempts"].items():
             self._add_failure_record(a["failed_attempts"], key, rec["attempts"], rec["fatal"], rec["evidence"])
         self._add_evidence(a, b["evidence"], b["evidence_count"])
+        a["incidents"] = (a.get("incidents", []) + b.get("incidents", []))[-self.evidence_limit:]
         for u, v, key, data in list(self.g.in_edges(other, keys=True, data=True)) + \
                 list(self.g.out_edges(other, keys=True, data=True)):
             u2, v2 = (keep if u == other else u), (keep if v == other else v)
@@ -195,8 +204,11 @@ class WorldGraph:
     # -- edges -------------------------------------------------------------
     def record_execution(self, start: Observation, run: ExecutionResult, ref: str) -> str:
         """Update evidence from one executed skill. Returns what was recorded:
-        success | stay | inconclusive | failure_edge | failure_node | unanchored."""
+        success | stay | inconclusive | failure_edge | failure_node | unanchored | level_changed.
+        A fatal skill also leaves an incident (what touched Dave, and where) on its start node."""
         self.observe(start)
+        if run.observation.level_id != start.level_id:
+            return "level_changed"  # a transition between levels is never an edge of either graph
         self.observe(run.observation)
         source = self.locate(start)
         if source is None:
@@ -206,6 +218,8 @@ class WorldGraph:
         key = edge_key(run.skill, context)
         fatal = run.reason == "hazard_contact" or any(e.event_type == "death" for e in run.events)
         self._add_evidence(self.g.nodes[source], [ref], 1)
+        if fatal:
+            self._add_incident(self.g.nodes[source], run, ref)
 
         if run.outcome == "completed":
             target = self.locate(run.observation)
@@ -246,6 +260,40 @@ class WorldGraph:
         self._add_failure_record(self.g.nodes[source]["failed_attempts"], key, 1, int(fatal), [ref])
         return "failure_node"
 
+    def skill_evidence(self, obs: Observation) -> dict[str, dict[str, Any]]:
+        """Per skill, the recorded outcomes of starting it from the segment Dave stands on with the
+        same held items: attempts, successes and fatal over the out-edges and the segment's failed
+        attempts, and ``lands`` (row, col_min, col_max), the segment most often reached. Empty when
+        Dave is not on a mapped segment."""
+        source = self.locate(obs)
+        if source is None:
+            return {}
+        context = list(inventory_context(obs))
+        out: dict[str, dict[str, Any]] = {}
+
+        def entry(skill: str) -> dict[str, Any]:
+            return out.setdefault(skill, {"attempts": 0, "successes": 0, "fatal": 0, "lands": None})
+
+        best: dict[str, int] = {}
+        for _, target, edge in self.g.out_edges(source, data=True):
+            if edge["inventory_context"] != context:
+                continue
+            rec = entry(edge["skill"])
+            for field in ("attempts", "successes", "fatal"):
+                rec[field] += edge[field]
+            if edge["successes"] > best.get(edge["skill"], 0):
+                best[edge["skill"]] = edge["successes"]
+                node = self.g.nodes[target]
+                rec["lands"] = (node["row"], node["col_min"], node["col_max"])
+        for key, failed in self.g.nodes[source]["failed_attempts"].items():
+            skill, _, items = key.partition("|")
+            if (items.split(",") if items else []) != context:
+                continue
+            rec = entry(skill)
+            rec["attempts"] += failed["attempts"]
+            rec["fatal"] += failed["fatal"]
+        return out
+
     def suggest(self, level_id: str, col: int, row: int, source: str, rationale: str = "") -> None:
         """Record an exploration target proposed by a model or planner. Suggestions are
         never topology: they create no nodes or edges and route search ignores them."""
@@ -258,6 +306,14 @@ class WorldGraph:
     def _add_evidence(self, item: dict[str, Any], refs: list[str], count: int) -> None:
         item["evidence"] = (item["evidence"] + [r for r in refs if r not in item["evidence"]])[-self.evidence_limit:]
         item["evidence_count"] += count
+
+    def _add_incident(self, node: dict[str, Any], run: ExecutionResult, ref: str) -> None:
+        """What touched Dave on the first burning frame of a fatal skill, and where."""
+        hit = next((s.observation for s in run.steps if s.observation.player_state == "burning"), run.observation)
+        cause, tile = contact_cause(hit)
+        incidents = node.setdefault("incidents", [])
+        incidents.append({"skill": run.skill, "cause": cause, "tile": tile, "ref": ref})
+        del incidents[:-self.evidence_limit]
 
     def _add_failure_record(self, records: dict, key: str, attempts: int, fatal: int, refs: list[str]) -> None:
         rec = records.setdefault(key, {"attempts": 0, "fatal": 0, "evidence": [], "evidence_count": 0})
@@ -297,3 +353,57 @@ def success_probability(edge: dict[str, Any]) -> float:
 
 def expected_frames(edge: dict[str, Any]) -> float:
     return edge["frames_total"] / edge["successes"] if edge["successes"] else 0.0
+
+
+class GraphStore:
+    """One ``WorldGraph`` per level, created on first sight of the level (docs/graph.md). The
+    episode loop and the goal manager use it like a graph: every call is routed by the
+    observation's ``level_id``, so no node, edge, frontier or route ever spans two levels."""
+
+    def __init__(self, adapter: str, build_id: str, observation_policy: str, evidence_limit: int = 20) -> None:
+        self.adapter, self.build_id, self.observation_policy = adapter, build_id, observation_policy
+        self.evidence_limit = evidence_limit
+        self.levels: dict[str, WorldGraph] = {}
+
+    def for_level(self, level_id: str) -> WorldGraph:
+        if level_id not in self.levels:
+            self.levels[level_id] = WorldGraph(self.adapter, self.build_id, self.observation_policy,
+                                               self.evidence_limit, level_id)
+        return self.levels[level_id]
+
+    def get(self, level_id: str) -> WorldGraph | None:
+        return self.levels.get(level_id)
+
+    def observe(self, obs: Observation) -> None:
+        self.for_level(obs.level_id).observe(obs)
+
+    def record_execution(self, start: Observation, run: ExecutionResult, ref: str) -> str:
+        if run.observation.level_id != start.level_id:
+            self.observe(run.observation)  # the new level's first view, in its own graph
+        return self.for_level(start.level_id).record_execution(start, run, ref)
+
+    def skill_evidence(self, obs: Observation) -> dict[str, dict[str, Any]]:
+        graph = self.get(obs.level_id)
+        return {} if graph is None else graph.skill_evidence(obs)
+
+    def add_lineage(self, run_id: str, episode_key: str, arm: str, scenario_id: str) -> None:
+        for graph in self.levels.values():
+            graph.add_lineage(run_id, episode_key, arm, scenario_id)
+
+    @property
+    def lineage(self) -> list[dict[str, Any]]:
+        seen, out = set(), []
+        for graph in self.levels.values():
+            for entry in graph.lineage:
+                key = (entry["run_id"], entry["episode_key"])
+                if key not in seen:
+                    seen.add(key)
+                    out.append(entry)
+        return out
+
+    def counts(self) -> dict[str, Any]:
+        total: dict[str, Any] = dict.fromkeys(WorldGraph("", "", "").counts(), 0)
+        for graph in self.levels.values():
+            for name, value in graph.counts().items():
+                total[name] += value
+        return {"levels": sorted(self.levels), **total}

@@ -7,26 +7,32 @@ into decisions. The optional learned graph (graph-enabled arms only) is updated 
 observations. The optional goal manager runs at decision boundaries: after the episode starts
 and after each skill it ends goals that are due and calls the planner on shared triggers; on
 graph-enabled arms it also turns the goal into a route waypoint (control/goals.py).
+Before each model decision the candidates get experience notes (control/experience.py): what
+each skill did from this tile earlier in the episode (every arm), and on graph-enabled arms what
+it did from this platform in past runs (the graph as it was at episode start).
 Budgets: the simulation-frame budget (``max_frames``) and the wall-time budget
 (``max_wall_seconds``) are checked before every decision; model-backed controllers raise
 ``BudgetExhausted`` when a call/token/cost budget runs out with ``on_budget_exhausted:
-terminate``. Each ends the episode as ``truncated`` with the budget in the termination reason.
+terminate``. Each ends the episode as ``truncated`` with the budget in the termination reason. Ctrl-C ends the episode as ``truncated`` / ``interrupted``,
+writes what was recorded so far, and re-raises.
 """
 
 from __future__ import annotations
 
+import copy
 import logging
 import time
 from dataclasses import dataclass, field
 
 from dave_agent.adapters.base import GameAdapter
 from dave_agent.config import ExecutorConfig, SkillSpec
+from dave_agent.control.experience import annotate_experience
 from dave_agent.control.goals import GoalManager, PlanningRecord, PlanningStep
 from dave_agent.control.skills import ExecutionResult, execute, generate_candidates
 from dave_agent.memory.detector import EventDetector
 from dave_agent.memory.episodes import EpisodeRecorder
-from dave_agent.memory.graph import WorldGraph
-from dave_agent.memory.working import WorkingMemory
+from dave_agent.memory.graph import GraphStore
+from dave_agent.memory.working import WorkingMemory, player_tile
 from dave_agent.models.base import TacticalController
 from dave_agent.models.tactical import BudgetExhausted
 from dave_agent.schemas import Decision, Event, ModelCallRecord, validate_decision
@@ -61,6 +67,14 @@ class EpisodeResult:
     candidate_sets: list[CandidateRecord] = field(default_factory=list)
     executions: list[ExecutionResult] = field(default_factory=list)
     planning: list[PlanningRecord] = field(default_factory=list)
+    # Monotonic wall time of the whole episode (reset to the end, model waits included).
+    wall_seconds: float = 0.0
+    # Per model-chosen decision (not forced): summed latency of every call made for it, re-asks
+    # included. None when a call reported no latency.
+    decision_latency_ms: list[float | None] = field(default_factory=list)
+    decision_calls: list[int] = field(default_factory=list)  # calls per model-chosen decision
+    # Player tile (col, row) where each execution started; None when the position is unavailable.
+    execution_starts: list[tuple[int, int] | None] = field(default_factory=list)
 
 
 def run_episode(
@@ -73,11 +87,16 @@ def run_episode(
     seed: int,
     max_frames: int,
     recorder: EpisodeRecorder | None = None,
-    graph: WorldGraph | None = None,
+    graph: GraphStore | None = None,
     goals: GoalManager | None = None,
     max_wall_seconds: float | None = None,
+    evidence: GraphStore | None = None,
 ) -> EpisodeResult:
     started = time.monotonic()
+    # ``evidence``: the graph-enabled arm's graph (learning or frozen). Its "past runs" notes come
+    # from a copy taken before this episode, so they never count this episode's attempts (those
+    # are in the working-memory notes).
+    past = copy.deepcopy(evidence) if evidence is not None else None
     observation = adapter.reset(scenario_id, seed)
     memory.reset(observation)
     if graph is not None:
@@ -134,10 +153,21 @@ def run_episode(
                     candidate_id=candidates[0].candidate_id, observation_id=observation.observation_id, forced=True
                 )
             else:
+                if observation.player_position is not None:
+                    candidates = annotate_experience(
+                        candidates, memory.experience(player_tile(observation.player_position)),
+                        None if past is None else past.skill_evidence(observation))
                 if goals is not None:
-                    # Estimated end tiles in the descriptions (control/reach.py); the offered set and
-                    # its digest above are unchanged, so replay and parity checks are unaffected.
-                    candidates = goals.annotate(observation, candidates, skills)
+                    # Estimated end tiles and predicted threat contacts in the descriptions; candidates
+                    # predicted to touch a threat are masked (control/threats.py). The offered set and
+                    # its digest above are unchanged; the screen depends only on the observation and
+                    # the shared cell memory, so it is identical for every arm and replays exactly.
+                    candidates, screened = goals.annotate(observation, candidates, skills)
+                    if screened:
+                        events.append(Event(event_type="candidates_screened", episode_id=observation.episode_id,
+                                            frame=observation.frame, certainty="derived",
+                                            payload={"masked": screened,
+                                                     "kept": [c.candidate_id for c in candidates]}))
                 try:
                     decision, calls = controller.decide(observation, memory.goal, candidates, memory.context())
                 except BudgetExhausted as exc:
@@ -150,6 +180,9 @@ def run_episode(
                     stop = (f"budget:{exc.budget}", {"budget": exc.budget})
                     break
                 result.model_calls.extend(calls)
+                result.decision_latency_ms.append(
+                    None if any(c.latency_ms is None for c in calls) else sum(c.latency_ms for c in calls))
+                result.decision_calls.append(len(calls))
                 events.extend(_failure_events(calls, observation))
                 if decision.fallback:
                     events.append(Event(event_type="decision_fallback", episode_id=observation.episode_id,
@@ -173,6 +206,8 @@ def run_episode(
                 ref = f"{recorder.episode_key if recorder else observation.episode_id}#{observation.observation_id}"
                 graph.record_execution(observation, run, ref)
             result.executions.append(run)
+            tile = None if observation.player_position is None else player_tile(observation.player_position)
+            result.execution_starts.append(None if tile is None else (tile.col, tile.row))
             result.events.extend(events)
             memory.record(decision, run)
             if recorder is not None:
@@ -182,10 +217,17 @@ def run_episode(
             if goals is not None:
                 planned(goals.update(observation, memory, events, run))
             log.debug("frame=%d skill=%s outcome=%s reason=%s", observation.frame, run.skill, run.outcome, run.reason)
-    except Exception as exc:
-        result.outcome, result.termination_reason = "error", f"error:{type(exc).__name__}: {exc}"
+    except (Exception, KeyboardInterrupt) as exc:
+        if isinstance(exc, KeyboardInterrupt):
+            result.outcome, result.termination_reason = "truncated", "interrupted"
+        else:
+            result.outcome, result.termination_reason = "error", f"error:{type(exc).__name__}: {exc}"
+        result.wall_seconds = time.monotonic() - started
+        result.frames, result.score, result.lives = observation.frame, observation.score, observation.lives
         if recorder is not None:
+            # Writes the batched rows too, so an interrupted run keeps its decisions.
             recorder.finish(result.outcome, result.termination_reason, observation, [])
+        exc.episode_result = result  # the partial evidence, for callers that record failed episodes
         raise
 
     end_events: list[Event] = []
@@ -204,6 +246,7 @@ def run_episode(
     result.frames = observation.frame
     result.score = observation.score
     result.lives = observation.lives
+    result.wall_seconds = time.monotonic() - started
     if recorder is not None:
         recorder.finish(result.outcome, result.termination_reason, observation, end_events)
     return result

@@ -4,7 +4,9 @@ Plain httpx; credentials come from the environment (``.env``, see ``.env.example
 never logged. Transport failures (timeouts, 429, 5xx) are retried up to ``max_retries`` with
 exponential backoff; output validation and its retry belong to the goal manager (planner)
 and ``models.tactical.ModelController`` (tactical).
-No price table is assumed, so ``cost_usd`` stays None; token usage is recorded as reported.
+Azure reports no charge. Token usage is recorded as reported; ``cost_usd`` stays None unless
+the user configures a price table (``models.<role>.price``), in which case it is an *estimate*
+(``cost_source="estimated"``) with the price source and date in the record's ``output``.
 """
 
 from __future__ import annotations
@@ -20,7 +22,7 @@ from dataclasses import dataclass, field
 import httpx
 from dotenv import load_dotenv
 
-from dave_agent.config import ConfigError
+from dave_agent.config import ConfigError, PriceConfig
 from dave_agent.models.http import post_json
 from dave_agent.models.planner import PlanningRequest
 from dave_agent.models.tactical import GAME_RULES, INPUT_GUIDE, TACTICAL_TASK, TacticalChoice, TacticalRequest, \
@@ -109,8 +111,11 @@ You choose the agent's next objective. A separate tactical controller executes s
 
 {GAME_RULES}
 
+`map` is the level as far as it has been seen this episode, like a human player remembers it: `rows` are map rows (each starts with its row number), `col_ruler` gives each column's tens and units digit, `screen_cols` is the part on screen now. Dave stands on the empty cell above a `#`. He jumps about 2 rows up and up to about 6 columns sideways; he cannot pass through `#`, and touching `X`, `M` or `*` kills him.
+
 Choose exactly one goal id from `candidates`. Prefer progress toward completing the level, avoid repeating a goal that just failed, and consider the trigger that caused this planning call.
-Reply with JSON {{"goal": "<candidate id>", "rationale": "<one short sentence, at most 200 characters>"}}. Give a brief rationale only, not step-by-step reasoning."""
+Read the map and plan the path to the goal's target over platforms and around hazards: often the way is not straight at the target (climb ledges first, go around a pit of fire, go back to a platform that leads over a wall). If that path is not a direct walk or a single jump, and always when the triggers include `stuck` or `repeated_failures`, list in `waypoints` up to 5 intermediate tiles [col, row] in order, each an empty cell directly above a `#` that Dave can stand on; leave it empty otherwise. `waypoints` in the request are the ones still ahead from your last plan.
+Reply with JSON {{"goal": "<candidate id>", "rationale": "<one short sentence, at most 200 characters>", "waypoints": [[col, row], ...]}}. Give a brief rationale only, not step-by-step reasoning."""
 
 
 def request_payload(request: PlanningRequest) -> dict:
@@ -122,24 +127,28 @@ class AzurePlanner:
     provider = "azure_openai"
 
     def __init__(self, client: AzureChatClient, max_completion_tokens: int = 2000,
-                 reasoning_effort: str | None = "low") -> None:
+                 reasoning_effort: str | None = "low", price: PriceConfig | None = None) -> None:
         self.client = client
         self.model = client.settings.deployment
         self.max_completion_tokens = max_completion_tokens
         self.reasoning_effort = reasoning_effort
+        self.price = price
 
     def settings(self) -> dict:
-        return _effective(self.client, self.max_completion_tokens, self.reasoning_effort)
+        return _effective(self.client, self.max_completion_tokens, self.reasoning_effort, self.price)
 
     def body(self, request: PlanningRequest, feedback: str | None = None) -> dict:
         messages = [{"role": "system", "content": SYSTEM_PROMPT},
                     {"role": "user", "content": json.dumps(request_payload(request), separators=(",", ":"))}]
         if feedback:
             messages.append({"role": "user", "content": f"Your previous answer was rejected: {feedback}. "
-                                                        "Answer again with one offered goal id."})
-        schema = {"type": "object", "additionalProperties": False, "required": ["goal", "rationale"],
+                                                        "Answer again with one offered goal id and valid "
+                                                        "waypoints."})
+        schema = {"type": "object", "additionalProperties": False, "required": ["goal", "rationale", "waypoints"],
                   "properties": {"goal": {"type": "string", "enum": list(request.candidate_ids)},
-                                 "rationale": {"type": "string"}}}
+                                 "rationale": {"type": "string"},
+                                 "waypoints": {"type": "array",
+                                               "items": {"type": "array", "items": {"type": "integer"}}}}}
         body = {"messages": messages, "max_completion_tokens": self.max_completion_tokens,
                 "response_format": {"type": "json_schema",
                                     "json_schema": {"name": "plan_choice", "strict": True, "schema": schema}}}
@@ -152,17 +161,31 @@ class AzurePlanner:
         result = self.client.complete(body)
         record = ModelCallRecord(provider=self.provider, model=self.model, purpose="planner",
                                  latency_ms=result.latency_ms, retries=result.retries, status=result.status,
-                                 usage=result.usage, request_ref=_request_ref(body), response_ref=result.response_id)
+                                 usage=result.usage, request_ref=_request_ref(body), response_ref=result.response_id,
+                                 **estimated_cost(result.usage, self.price))
         log.debug("planner call %s status=%s finish=%s", record.request_ref, result.status, result.finish_reason)
         return (result.text if result.status == "ok" else None), record
 
 
-def _effective(client: AzureChatClient, max_completion_tokens: int, reasoning_effort: str | None) -> dict:
+def _effective(client: AzureChatClient, max_completion_tokens: int, reasoning_effort: str | None,
+               price: PriceConfig | None) -> dict:
     """Effective model settings recorded with every run (no credentials)."""
     return {"provider": "azure_openai", "deployment": client.settings.deployment,
             "api_version": client.settings.api_version, "max_completion_tokens": max_completion_tokens,
             "reasoning_effort": reasoning_effort, "timeout_seconds": client.timeout_seconds,
-            "transport_retries": client.max_retries}
+            "transport_retries": client.max_retries,
+            "price": None if price is None else price.model_dump(mode="json")}
+
+
+def estimated_cost(usage: dict[str, float] | None, price: PriceConfig | None) -> dict:
+    """``ModelCallRecord`` cost fields for one call: an estimate from the configured price table,
+    or nothing when there is no price or the provider reported no usage (never assumed zero).
+    Completion tokens include reasoning tokens, so they are priced once, at the output rate."""
+    if price is None or not usage or "prompt_tokens" not in usage or "completion_tokens" not in usage:
+        return {}
+    cost = (usage["prompt_tokens"] * price.input_per_mtok + usage["completion_tokens"] * price.output_per_mtok) / 1e6
+    return {"cost_usd": cost, "cost_source": "estimated",
+            "output": {"price_source": price.source, "price_as_of": price.as_of}}
 
 
 def _request_ref(body: dict) -> str:
@@ -187,14 +210,15 @@ class AzureTacticalModel:
     provider = "azure_openai"
 
     def __init__(self, client: AzureChatClient, max_completion_tokens: int = 2000,
-                 reasoning_effort: str | None = "low") -> None:
+                 reasoning_effort: str | None = "low", price: PriceConfig | None = None) -> None:
         self.client = client
         self.model = client.settings.deployment
         self.max_completion_tokens = max_completion_tokens
         self.reasoning_effort = reasoning_effort
+        self.price = price
 
     def settings(self) -> dict:
-        return _effective(self.client, self.max_completion_tokens, self.reasoning_effort)
+        return _effective(self.client, self.max_completion_tokens, self.reasoning_effort, self.price)
 
     def body(self, request: TacticalRequest, feedback: str | None = None) -> dict:
         payload = request.model_dump(mode="json", exclude={"episode_id", "observation_id"})
@@ -217,7 +241,8 @@ class AzureTacticalModel:
         result = self.client.complete(body)
         record = ModelCallRecord(provider=self.provider, model=self.model, purpose="tactical",
                                  latency_ms=result.latency_ms, retries=result.retries, status=result.status,
-                                 usage=result.usage, request_ref=_request_ref(body), response_ref=result.response_id)
+                                 usage=result.usage, request_ref=_request_ref(body), response_ref=result.response_id,
+                                 **estimated_cost(result.usage, self.price))
         log.debug("tactical call %s status=%s finish=%s", record.request_ref, result.status, result.finish_reason)
         return (result.text if result.status == "ok" else None), record
 

@@ -152,3 +152,42 @@ def test_graph_arm_learns_checkpoint_and_graph_command_inspects_it(capsys, tmp_p
     # Graph-disabled arms never create or read a checkpoint.
     code, out, _ = _run(capsys, "play", "--arm", "A", "--mock", "--config", str(CONFIG))
     assert code == 0 and json.loads(out)["graph"] is None
+
+
+def test_interrupted_play_keeps_its_episode_and_graph(capsys, tmp_path, monkeypatch):
+    """Ctrl-C mid-episode: the recorded decisions are written, the episode row is finished as
+    truncated/interrupted, and a graph arm still saves what it learned."""
+    import dataclasses
+    import sqlite3
+
+    from dave_agent import cli
+    from dave_agent.runner import session
+
+    class StopAfter:
+        def __init__(self, inner, n):
+            self.inner, self.n, self.provider, self.model = inner, n, inner.provider, inner.model
+
+        def decide(self, *args):
+            self.n -= 1
+            if self.n < 0:
+                raise KeyboardInterrupt
+            return self.inner.decide(*args)
+
+    def interrupting(*args):
+        models = session.build_models(*args)
+        return dataclasses.replace(models, controller=StopAfter(models.controller, 4))
+    monkeypatch.setattr(cli, "build_models", interrupting)
+    ckpt = tmp_path / "g.json"
+    code, out, err = _run(capsys, "play", "--arm", "C", "--mock", "--config", str(CONFIG), "--graph", str(ckpt),
+                          "--run-id", "stopped")
+    assert code == 130 and out == ""
+    report = json.loads(err)
+    store = tmp_path / "g"  # a store path X.json is the directory X, one checkpoint per level
+    assert report["interrupted"] and report["graph_checkpoint"] == str(store) and store.is_dir()
+    with sqlite3.connect(STORE) as db:
+        outcome, reason, decisions = db.execute(
+            "SELECT outcome, termination_reason, decisions FROM episodes WHERE run_id = 'stopped'").fetchone()
+        rows = db.execute("SELECT COUNT(*) FROM decisions").fetchone()[0]
+    assert (outcome, reason) == ("truncated", "interrupted") and decisions == rows >= 4
+    (level,) = store.glob("*.json")
+    assert json.loads(level.read_text(encoding="utf-8"))["lineage"][0]["run_id"] == "stopped"

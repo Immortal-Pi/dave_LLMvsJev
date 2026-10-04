@@ -218,6 +218,8 @@ EventType = Literal[
     "goal_set",
     "goal_achieved",
     "goal_failed",
+    # Candidates removed by the threat check (control/threats.py; payload: masked {id: reason}).
+    "candidates_screened",
 ]
 
 

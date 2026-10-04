@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-A Python research harness that plays *Dangerous Dave* (via the open-source [deadly-dave](https://github.com/skoperst/deadly-dave) reimplementation) from structured game state. It compares an Azure OpenAI LLM tactical controller with TypeSafe's **Jev** System One model (via OpenRouter), holding the planner, observations, memory and action interface constant. The phased spec is in `implementation/`; the code is in `src/dave_agent/` (CLI: `dave-agent`). `test.ipynb` holds early Jev API experiments.
+A Python research harness that plays *Dangerous Dave* (via the open-source [deadly-dave](https://github.com/skoperst/deadly-dave) reimplementation) from structured game state. It compares an Azure OpenAI LLM tactical controller with TypeSafe's **Jev** System One model (via OpenRouter), holding the planner, observations, memory and action interface constant. The phased spec is in `implementation/`; the code is in `src/dave_agent/` (CLI: `dave-agent`). `frontend/` is a local Next.js viewer for inspection bundles (`docs/inspector.md`). `test.ipynb` holds early Jev API experiments.
 
 `AGENTS.md` sets the style, commit, and security conventions.
 
@@ -19,6 +19,8 @@ Detailed documentation lives in `docs/`. Read the relevant file before working i
 - [docs/memory.md](docs/memory.md): working memory (bounded history, progress and stuck counters, controller context), derived events, the SQLite episode store, JSONL export and replay.
 - [docs/graph.md](docs/graph.md): the learned world graph (platform segmentation, evidence-based edges, Dijkstra routes, atomic versioned checkpoints).
 - [docs/planner.md](docs/planner.md): the strategic planner and goal manager (candidate goals, goal lifecycle, shared triggers, fallback, the Azure planner, graph route waypoints).
+- [docs/benchmark.md](docs/benchmark.md): the benchmark protocol (paired trials, arm order, cold and warm memory regimes, the manifest, per-episode records, metrics and summaries, the paid-run ceiling and Azure price table, Dave settings).
+- [docs/inspector.md](docs/inspector.md): the decision inspector (`dave-agent inspect`: exact replay checked against the recorded request digests, per-decision bundles with the exact Jev and LLM requests, real outcomes of every option, screenshots, opt-in `--ask`) and the local read-only viewer in `frontend/` (Next.js).
 - [docs/tactical.md](docs/tactical.md): tactical controllers (the shared request, output validation, retry, deterministic fallback, per-episode budgets, context digests, the Azure and Jev tactical models).
 - [docs/state_mapping.md](docs/state_mapping.md): deadly-dave C fields mapped to `Observation` fields.
 - [docs/jev-apis.md](docs/jev-apis.md): the OpenRouter chat SDK and the decisions endpoint, including models, payload shape, question types, and config.

@@ -14,14 +14,17 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from dave_agent.config import GraphConfig, PlanningConfig, ReachConfig, SkillSpec
+from dave_agent.config import GraphConfig, PlanningConfig, ReachConfig, SkillSpec, ThreatConfig
+from dave_agent.control.level_map import render
 from dave_agent.control.reach import ReachMap, estimate_end, next_waypoint
 from dave_agent.control.skills import ExecutionResult
-from dave_agent.memory.graph import STANDING_STATES, WorldGraph
+from dave_agent.control.threats import assess, screen
+from dave_agent.memory.graph import BLOCKING_KINDS, STANDING_STATES, GraphStore, WorldGraph
 from dave_agent.memory.routes import Route, RouteTracker, find_route, held_items
 from dave_agent.memory.working import FAILED_OUTCOMES, WorkingMemory, player_tile
 from dave_agent.models.planner import (
     GoalCandidate,
+    PlanChoice,
     PlanningRequest,
     PlanOutputError,
     StrategicPlanner,
@@ -226,6 +229,11 @@ def _route_summary(route: Route, graph: WorldGraph) -> dict[str, Any]:
     if route.status == "found":
         summary.update(steps=len(route.steps), cost=round(route.cost or 0.0, 3),
                        skills=[s.skill for s in route.steps][:5])
+        # Deaths recorded on the route's platforms in past runs: what killed Dave, and where.
+        incidents = [{"cause": i["cause"], "tile": i["tile"], "skill": i["skill"]}
+                     for n in route.nodes[:-1] for i in graph.g.nodes[graph.resolve(n)].get("incidents", [])]
+        if incidents:
+            summary["incidents"] = incidents[-5:]
     elif route.status == "unreachable":
         summary.update(reason=route.reason, frontier=list(route.frontier[:3]))
     return summary
@@ -233,12 +241,12 @@ def _route_summary(route: Route, graph: WorldGraph) -> dict[str, Any]:
 
 class GoalManager:
     def __init__(self, planner: StrategicPlanner, planning: PlanningConfig, max_retries: int,
-                 graph: WorldGraph | None = None, graph_cfg: GraphConfig | None = None,
-                 reach: ReachConfig | None = None) -> None:
+                 graph: GraphStore | None = None, graph_cfg: GraphConfig | None = None,
+                 reach: ReachConfig | None = None, threats: ThreatConfig | None = None) -> None:
         if (graph is None) != (graph_cfg is None):
             raise ValueError("graph and graph_cfg go together")
         self.planner, self.cfg, self.max_retries = planner, planning, max_retries
-        self.graph, self.graph_cfg, self.reach = graph, graph_cfg, reach
+        self.graph, self.graph_cfg, self.reach, self.threats = graph, graph_cfg, reach, threats
         self.targets = TargetMemory()
         self._reset_state()
 
@@ -255,8 +263,15 @@ class GoalManager:
         self._held: frozenset[str] = frozenset()
         self._tracker: RouteTracker | None = None
         self._goal_start = 0
-        self._cells: dict[tuple[int, int], str] = {}  # observed tiles this level, for reachability
+        self._cells: dict[tuple[int, int], str] = {}  # observed tiles this level (reach, map)
         self._cells_level: str | None = None
+        self._waypoints: list[TilePos] = []  # the planner's waypoints still ahead, in order
+
+    @property
+    def level_graph(self) -> WorldGraph:
+        """The learned graph of the current level (graph-enabled arms only)."""
+        assert self.graph is not None and self.level_id is not None
+        return self.graph.for_level(self.level_id)
 
     # -- observation feed ------------------------------------------------------------------
     def reset(self, obs: Observation, memory: WorkingMemory) -> PlanningStep:
@@ -297,6 +312,8 @@ class GoalManager:
             self._pending.add("inventory_changed")
         if run is not None:
             self._failures = self._failures + 1 if run.outcome in FAILED_OUTCOMES else 0
+        if self.goal is not None:
+            self._advance_waypoints(obs, memory)
         if self.goal is not None and self.graph is not None:
             self._follow_route(obs, memory, run)
         if self.goal is not None:
@@ -313,6 +330,7 @@ class GoalManager:
         self.previous = {"target_ref": goal.target_ref, "status": status, "reason": reason,
                          "frames_active": obs.frame - self._goal_start}
         self.goal, self._tracker = None, None
+        self._waypoints = []
         self._pending.add(f"goal_{status}")
         event_type = "goal_achieved" if status == "achieved" else "goal_failed"
         return Event(event_type=event_type, episode_id=obs.episode_id, frame=obs.frame, location=_goal_tile(goal),
@@ -348,12 +366,14 @@ class GoalManager:
         route_ms = 0.0  # Python route search, timed separately from model latency (graph arms only)
         if self.graph is not None:
             t0 = time.perf_counter()
-            candidates = tuple(c.model_copy(update={"route": _route_summary(self._route(obs, c), self.graph)})
+            candidates = tuple(c.model_copy(update={"route": _route_summary(self._route(obs, c),
+                                                                                 self.level_graph)})
                                for c in candidates)
             route_ms = (time.perf_counter() - t0) * 1000
         request = self._request(obs, memory, tuple(sorted(triggers)), candidates)
 
         chosen, fallback_reason, errors, attempts, model_ms = None, None, [], 0, 0.0
+        partial = None  # a valid goal whose waypoints were rejected: used once the retries run out
         if self.calls >= self.cfg.max_calls_per_episode:
             fallback_reason = "call_cap"
         else:
@@ -371,7 +391,16 @@ class GoalManager:
                         feedback = str(exc)
                         errors.append(feedback)
                     else:
-                        chosen = (next(c for c in candidates if c.candidate_id == choice.goal), choice.rationale)
+                        pick = next(c for c in candidates if c.candidate_id == choice.goal)
+                        valid, bad = self._check_waypoints(choice)
+                        if bad:
+                            call = call.model_copy(update={"status": "invalid_output"})
+                            feedback = (f"waypoints {bad} are not empty explored cells directly above a '#' "
+                                        "on the map; give standing tiles [col, row] or none")
+                            errors.append(feedback)
+                            partial = (pick, choice.rationale, valid)
+                        else:
+                            chosen = (pick, choice.rationale, valid)
                 else:
                     errors.append(f"call {call.status}")
                     feedback = None
@@ -384,6 +413,8 @@ class GoalManager:
                 if chosen is not None:
                     break
             self.last_call_frame = obs.frame
+            if chosen is None and partial is not None:
+                chosen = partial  # the goal stands; only its invalid waypoints are dropped
             if chosen is None:
                 fallback_reason = "planner_failed" if errors else "call_cap"
         if chosen is None:
@@ -393,11 +424,11 @@ class GoalManager:
                 return step
             avoid = self.previous["target_ref"] if self.previous and self.previous["status"] != "achieved" else None
             pick = rule_choice(candidates, avoid)
-            chosen = (pick, f"deterministic fallback ({fallback_reason})")
+            chosen = (pick, f"deterministic fallback ({fallback_reason})", [])
 
-        candidate, rationale = chosen
+        candidate, rationale, waypoints = chosen
         t1 = time.perf_counter()
-        goal, route = self._activate(obs, memory, candidate, rationale)
+        goal, route = self._activate(obs, memory, candidate, rationale, waypoints)
         if self.graph is not None:
             route_ms += (time.perf_counter() - t1) * 1000
         record = PlanningRecord(frame=obs.frame, observation_id=obs.observation_id, triggers=request.triggers,
@@ -414,11 +445,12 @@ class GoalManager:
                      "fallback_reason": fallback_reason, "attempts": attempts, "rationale": goal.rationale,
                      "waypoint": goal.next_waypoint.model_dump() if goal.next_waypoint else None,
                      "route": route, "route_ms": record.route_ms, "model_ms": record.model_ms,
+                     "waypoints": [[w.col, w.row] for w in waypoints],
                      "candidates": list(request.candidate_ids)}))
         return step
 
     def _activate(self, obs: Observation, memory: WorkingMemory, candidate: GoalCandidate,
-                  rationale: str) -> tuple[Goal, dict[str, Any] | None]:
+                  rationale: str, waypoints: list[TilePos] | None = None) -> tuple[Goal, dict[str, Any] | None]:
         self.seq += 1
         self.status = "planned"
         goal = Goal(goal_id=f"g{self.seq}", goal_type=candidate.goal_type, target_ref=candidate.candidate_id,
@@ -427,14 +459,17 @@ class GoalManager:
                     deadline_frame=obs.frame + self.cfg.goal_timeout_frames, rationale=rationale[:500],
                     source_observation_id=obs.observation_id)
         route = None
+        self._waypoints = list(waypoints or [])
         if self.graph is not None:
             planned = self._route(obs, candidate)
-            route = _route_summary(planned, self.graph)
-            self._tracker = RouteTracker(planned, self.graph, obs.inventory)
+            route = _route_summary(planned, self.level_graph)
+            self._tracker = RouteTracker(planned, self.level_graph, obs.inventory)
             goal = goal.model_copy(update={"next_waypoint": self._waypoint(planned, goal)})
         waypoint = self._reach_waypoint(obs, goal)
         if waypoint is not None:
             goal = goal.model_copy(update={"next_waypoint": waypoint})
+        if self._waypoints:
+            goal = goal.model_copy(update={"next_waypoint": self._waypoints[0]})
         self.goal, self.status, self._goal_start = goal, "active", obs.frame
         memory.set_goal(goal)
         self._pending.clear()
@@ -443,9 +478,8 @@ class GoalManager:
 
     # -- estimated reachability (every arm with a reach envelope) ----------------------------
     def _learn(self, obs: Observation) -> None:
-        """Remember every observed cell of this level (empty cells too) for reachability."""
-        if self.reach is None:
-            return
+        """Remember every observed cell of this level (empty cells too): the reach estimate and
+        the planner's map."""
         if obs.level_id != self._cells_level:
             self._cells, self._cells_level = {}, obs.level_id
         region = obs.region
@@ -470,35 +504,86 @@ class GoalManager:
         return final if cell is None else TilePos(col=cell[0], row=cell[1])
 
     def annotate(self, obs: Observation, candidates: list[SkillCandidate],
-                 skills: tuple[SkillSpec, ...]) -> list[SkillCandidate]:
-        """Each candidate with its estimated end tile appended to the description (the same
-        estimate for every arm). Unchanged without a reach envelope or while Dave is not standing."""
-        if self.reach is None or obs.player_position is None or obs.player_state not in STANDING_STATES:
-            return candidates
+                 skills: tuple[SkillSpec, ...]) -> tuple[list[SkillCandidate], dict[str, str]]:
+        """(candidates, masked {id: reason}), the same for every arm. Each candidate gets its
+        estimated end tile and, with a threat config, its first predicted contact with plasma, a
+        monster or a hazard (control/threats.py) appended to the description; candidates with a
+        contact are then masked unless all have one. End tiles need Dave standing on a known
+        cell; contacts are also predicted while he free-falls. Unchanged without a reach
+        envelope, or mid-jump."""
+        if self.reach is None or obs.player_position is None:
+            return candidates, {}
         reach = ReachMap(self._cells, self.reach)
-        here = reach.locate(obs.player_position.x, obs.player_position.y)
-        if here is None:
-            return candidates
+        here = (reach.locate(obs.player_position.x, obs.player_position.y)
+                if obs.player_state in STANDING_STATES else None)
         specs = {s.name: s for s in skills}
+        contacts = assess(obs, reach, candidates, specs, self.threats) if self.threats is not None else {}
+        if here is None and not contacts:
+            return candidates, {}  # mid-jump, or not on a known cell: nothing to estimate
         out = []
         for c in candidates:
-            end = estimate_end(reach, here, specs[c.skill])
-            note = ("estimated: no safe landing" if end is None
-                    else f"estimated end tile [{end[0]}, {end[1]}]" + (" (no movement)" if end == here else ""))
-            out.append(c.model_copy(update={"description": f"{c.description}; {note}"[:200]}))
-        return out
+            notes = []
+            if here is not None:
+                end = estimate_end(reach, here, specs[c.skill])
+                notes.append("estimated: no safe landing" if end is None else
+                             f"estimated end tile [{end[0]}, {end[1]}]" + (" (no movement)" if end == here else ""))
+            text = "; ".join([c.description, *notes])
+            if c.candidate_id in contacts:
+                contact = contacts[c.candidate_id]
+                # A danger note leads, so the 200-character cap never cuts it.
+                text = f"{text}; no threat predicted" if contact is None else f"{contact.note()}; {text}"
+            out.append(c.model_copy(update={"description": text[:200]}))
+        if self.threats is None or not self.threats.mask:
+            return out, {}
+        return screen(out, contacts)
 
     def _follow_reach(self, obs: Observation, memory: WorkingMemory) -> None:
         assert self.goal is not None
         waypoint = self._reach_waypoint(obs, self.goal)
-        if waypoint is not None and waypoint != self.goal.next_waypoint:
+        if waypoint is not None:
+            self._set_waypoint(waypoint, memory)
+
+    def _set_waypoint(self, waypoint: TilePos, memory: WorkingMemory) -> None:
+        """Point the goal at ``waypoint``, or at the planner's next waypoint while any is ahead."""
+        assert self.goal is not None
+        if self._waypoints:
+            waypoint = self._waypoints[0]
+        if waypoint != self.goal.next_waypoint:
             self.goal = self.goal.model_copy(update={"next_waypoint": waypoint})
             memory.set_goal(self.goal, restart_clock=False)
 
+    # -- planner waypoints -------------------------------------------------------------------
+    def _standable(self, col: int, row: int) -> bool:
+        kind = self._cells.get((col, row))
+        return kind is not None and kind not in BLOCKING_KINDS and self._cells.get((col, row + 1)) == "solid"
+
+    def _check_waypoints(self, choice: PlanChoice) -> tuple[list[TilePos], list[list[int]]]:
+        """(valid waypoints, rejected [col, row]): a waypoint must be an explored standing cell."""
+        valid, bad = [], []
+        for col, row in choice.waypoints:
+            if self._standable(col, row):
+                valid.append(TilePos(col=col, row=row))
+            else:
+                bad.append([col, row])
+        return valid, bad
+
+    def _advance_waypoints(self, obs: Observation, memory: WorkingMemory) -> None:
+        """Drop the planner waypoints Dave has reached (standing on the row, within 1 column), then
+        point the goal at the next one, or back at its target (the route or reach estimate
+        refines that right after on arms that have one)."""
+        assert self.goal is not None
+        if not self._waypoints or obs.player_position is None or obs.player_state not in STANDING_STATES:
+            return
+        here = player_tile(obs.player_position)
+        for i, w in enumerate(self._waypoints):
+            if here.row == w.row and abs(here.col - w.col) <= 1:
+                del self._waypoints[:i + 1]  # reached this one: those before it are behind too
+                self._set_waypoint(_goal_tile(self.goal), memory)
+                return
+
     # -- learned routes (graph-enabled arms only) -------------------------------------------
     def _target_node(self, obs: Observation, candidate: GoalCandidate, start: str | None) -> str | None:
-        graph = self.graph
-        assert graph is not None
+        graph = self.level_graph
         if candidate.goal_type != "explore":
             return graph.node_at(obs.level_id, candidate.target.row, candidate.target.col)
         # Explore: the cheapest reachable segment with an unexplored side in that direction.
@@ -514,8 +599,8 @@ class GoalManager:
         return min(costed)[1] if costed else options[0]
 
     def _route(self, obs: Observation, candidate: GoalCandidate) -> Route:
-        graph = self.graph
-        assert graph is not None and self.graph_cfg is not None
+        graph = self.level_graph
+        assert self.graph_cfg is not None
         start = graph.locate(obs)
         target = self._target_node(obs, candidate, start)
         if start is None:
@@ -531,15 +616,17 @@ class GoalManager:
         step = self._tracker.next_step if self._tracker else None
         if route.status != "found" or step is None or self.graph is None:
             return final
-        data = self.graph.g.nodes[self.graph.resolve(step.target)]
+        graph = self.level_graph
+        data = graph.g.nodes[graph.resolve(step.target)]
         return TilePos(col=min(max(final.col, data["col_min"]), data["col_max"]), row=data["row"])
 
     def _follow_route(self, obs: Observation, memory: WorkingMemory, run: ExecutionResult | None) -> None:
         """Route bookkeeping in Python; only a route lost after being found asks the planner."""
         assert self.graph is not None and self.goal is not None and self._tracker is not None
-        node = self.graph.locate(obs)
+        graph = self.level_graph
+        node = graph.locate(obs)
         failed = run is not None and run.outcome in FAILED_OUTCOMES
-        reason = self._tracker.update(self.graph, node, obs.inventory, step_failed=failed)
+        reason = self._tracker.update(graph, node, obs.inventory, step_failed=failed)
         if reason is None:
             waypoint = self._waypoint(self._tracker.route, self.goal)
         elif reason == "target_reached":
@@ -553,13 +640,11 @@ class GoalManager:
                                       target=_goal_tile(self.goal), description="",
                                       success_predicate=self.goal.success_predicate)
             route = self._route(obs, candidate)
-            self._tracker = RouteTracker(route, self.graph, obs.inventory)
+            self._tracker = RouteTracker(route, graph, obs.inventory)
             if had_route and route.status == "unreachable":
                 self._pending.add("route_invalidated")
             waypoint = self._waypoint(route, self.goal)
-        if waypoint != self.goal.next_waypoint:
-            self.goal = self.goal.model_copy(update={"next_waypoint": waypoint})
-            memory.set_goal(self.goal, restart_clock=False)
+        self._set_waypoint(waypoint, memory)
 
     # -- request -----------------------------------------------------------------------------
     def _request(self, obs: Observation, memory: WorkingMemory, triggers: tuple[str, ...],
@@ -591,4 +676,6 @@ class GoalManager:
             recent=recent, previous_goal=self.previous,
             current_goal=self.goal.target_ref if self.goal else None,
             candidates=candidates, graph_routes=self.graph is not None,
+            map=render(self._cells, obs, tuple((w.col, w.row) for w in self._waypoints)),
+            waypoints=tuple((w.col, w.row) for w in self._waypoints),
         )

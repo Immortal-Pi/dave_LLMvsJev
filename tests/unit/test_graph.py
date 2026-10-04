@@ -176,3 +176,21 @@ def test_no_unobserved_map_data_in_local_graph(adapter):
     # The real floor runs to col 10; the graph only knows it continues past col 7.
     floor = g.g.nodes["fixture_l1:r4:c5"]
     assert (floor["col_max"], floor["open_right"]) == (7, True)
+
+
+def test_skill_evidence_sums_edges_and_node_failures_for_the_held_items():
+    g = graph()
+    start = obs(player=(5, 3))
+    burning = obs(player=(3, 3), state="burning", oid=9)
+    for i in range(2):
+        g.record_execution(start, run("jump_right", obs(player=(6, 1), oid=2)), f"r#{i}")
+    g.record_execution(start, run("jump_right", burning, "interrupted", "hazard_contact", death=True), "r#3")
+    g.record_execution(start, run("jump_left", burning, "interrupted", "hazard_contact"), "r#4")
+    g.record_execution(obs(player=(5, 3), inventory={"trophy": 1}), run("jump_up", obs(player=(6, 1))), "r#5")
+    evidence = g.skill_evidence(obs(player=(4, 3)))  # anywhere on the same segment
+    assert evidence == {
+        "jump_right": {"attempts": 3, "successes": 2, "fatal": 1, "lands": (1, 6, 7)},
+        "jump_left": {"attempts": 1, "successes": 0, "fatal": 1, "lands": None},
+    }  # jump_up was recorded with the trophy held, so it does not apply without it
+    assert set(g.skill_evidence(obs(player=(4, 3), inventory={"trophy": 1}))) == {"jump_up"}
+    assert g.skill_evidence(obs(player=(4, 1), grounded=False, state="jumping")) == {}

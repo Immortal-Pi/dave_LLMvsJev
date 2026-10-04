@@ -39,6 +39,9 @@ benchmark:
   max_episode_wall_seconds: 3600
   paid_run_budget_usd: 5
   randomize_arm_order: true
+  seed: 0                      # trial k uses seed + k; also seeds arm order and the bootstrap
+  confidence: 0.95
+  bootstrap_samples: 2000
 arms:
   A: {planner: llm, tactical: llm, graph_enabled: false}
   B: {planner: llm, tactical: jev, graph_enabled: false}

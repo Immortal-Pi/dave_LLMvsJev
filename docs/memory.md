@@ -27,6 +27,7 @@ Every arm builds the identical memory, which `tests/unit/test_arm_parity.py` ass
 | Recent history | A deque of `HistoryEntry`, one per executed skill. Each entry holds: start/end frame and observation ids, candidate, skill, forced, outcome, reason, start/end position, end state, and the event types during the skill. Entries older than `memory.recent_history_frames` before the latest frame are dropped, and the deque never exceeds `memory.max_history_entries`. |
 | Derived motion | `motion()`: the pixel displacement from the window start, or from the last death or respawn, to now, plus the adapter's `player_velocity` |
 | Progress | `progress()`: see the next table |
+| Experience | `experience(tile)`: per skill, what starting it from that tile did **this episode**: attempts, deaths (a death event, or `hazard_contact`), `burned`, `no_move` (`moved_px == [0, 0]`) and the last end tile. It is not windowed and survives respawns, so after a death Dave's next visit to the tile shows what killed him. `reset` clears it. It reaches the models only as candidate notes (see "Experience notes"). |
 
 | `progress()` field | Meaning |
 | --- | --- |
@@ -45,6 +46,20 @@ Every arm builds the identical memory, which `tests/unit/test_arm_parity.py` ass
 - It is deterministic and bounded: the latest entry, motion, progress and the last `memory.context_entries` (8) entries.
 - It never contains a transcript or anything from the episode store.
 - Mock controllers ignore it. The live LLM and Jev models get it through the shared tactical request (`docs/tactical.md`).
+
+### Experience notes
+
+Before every model decision (`control/experience.py`, called from `run_episode`), each offered candidate that was tried before gets notes appended to its description. The notes come before the reach estimate:
+- **every arm:** `this episode from here: 2x, 2 died (burned), last end [3,9]` (working-memory experience for Dave's tile);
+- **graph-enabled arms:** `past runs from this platform: 5x, 3 ok, 2 fatal, lands row 7 cols 4-9` (`WorldGraph.skill_evidence`). It is read from a copy of the graph taken at episode start, so this episode is never counted twice. A frozen warm checkpoint gives the same notes in every trial.
+
+Rules:
+- An untried skill is unchanged. Descriptions stay capped at 200 characters.
+- Notes only inform: nothing is masked, and the controller still chooses.
+- The offered set and its digest are computed before the notes, so replay and parity checks are unaffected.
+- Mock controllers ignore descriptions, so the offline traces are unchanged.
+
+Why: Jev answers the same request the same way. Without the notes, Dave returning to a tile after a respawn saw exactly the request that led to his death, and repeated the fatal move.
 
 Limits: the 120-frame window is fixture-scale. A Dave jump takes 94 frames, so on Dave the window holds only a few entries. Tune it with the planner (Phase 6).
 

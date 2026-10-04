@@ -22,7 +22,7 @@ The tactical controller chooses **how** to pursue the planner's goal: one bounde
 | `entities` | visible monsters and shots with tile and velocity |
 | `goal` | goal type, target id, success predicate, `waypoint` and `waypoint_offset` (tiles from Dave), constraints, frames left |
 | `progress`, `recent` | `MemoryContext.progress` and the last `memory.context_entries` skills (outcome, reason, events, end tile) |
-| `candidates` | id, description and frame limit of every offered skill. On Dave the description ends with the skill's estimated end tile from `control/reach.py` (see `docs/planner.md`, "Reachability waypoints"); the waypoint is the next landing spot on the estimated route |
+| `candidates` | id, description and frame limit of every offered skill. A skill tried before from here first gets experience notes (this episode for every arm, past runs for graph arms; `docs/memory.md`, "Experience notes"). On Dave the description then ends with the skill's estimated end tile from `control/reach.py` (see `docs/planner.md`, "Reachability waypoints"); the waypoint is the next landing spot on the estimated route, or the planner's next waypoint. A skill predicted to touch plasma, a monster or a hazard is led by `danger: touches … in N ticks`; such skills are removed before the request is built, unless every skill has a contact (`docs/skills.md`, "Threat prediction and the candidate screen"). The others end with `no threat predicted` |
 
 There are no tools, no free-form planning and no growing transcript: each call sees one request.
 
@@ -51,7 +51,7 @@ The provider-neutral text lives in `models/tactical.py` and is sent to every pro
 - Model budgets are checked **before** every call, and the counters reset when a new episode id is seen.
 - With `on_budget_exhausted: terminate` (the default), the controller raises `BudgetExhausted`. The runner logs the calls already made for that decision, ends the episode as `truncated` with `termination_reason = budget:<name>`, and emits an `episode_truncated` event whose payload names the budget.
 - With `fallback`, play continues with fallback decisions and no further calls.
-- Azure does not report cost and no price table is assumed, so `cost_usd` stays null and the cost budget cannot fire for Azure. Tokens are recorded per call.
+- Azure does not report cost. Tokens are recorded per call. Without a price table `cost_usd` stays null; with `models.<role>.price` set (Phase 9), each Azure call gets an *estimated* `cost_usd` (`cost_source: estimated`, price source and date in `output`). See `docs/benchmark.md`.
 
 ## Traceability
 

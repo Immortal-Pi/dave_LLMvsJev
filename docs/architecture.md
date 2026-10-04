@@ -16,7 +16,7 @@ adapter.reset ─► GoalManager.reset ─► (planner on trigger) ─► Workin
       │                         polling for interrupts, until phases end or the cap is reached
       │                                                                             │
       └── final observation ◄── EventDetector (derived events) ─► WorkingMemory.record ─► EpisodeRecorder (write-only)
-                                                               ├► WorldGraph.record_execution (graph arms only)
+                                                               ├► GraphStore.record_execution (graph arms only; one graph per level)
                                                                └► GoalManager.update: end due goals, triggers,
                                                                   planner call or fallback, route waypoint (graph arms)
 ```
@@ -33,15 +33,18 @@ adapter.reset ─► GoalManager.reset ─► (planner on trigger) ─► Workin
 | `adapters/dave.py` | `DaveBridgeAdapter`: runs `external/deadly-dave/deadly-dave-bridge.exe` as a subprocess (JSON lines), decodes and filters state to the viewport, derives velocities and events, and implements snapshots by replaying inputs. Adds `screenshot()` and `raw_state()` for debugging only. |
 | `adapters/__init__.py` | `create_adapter(name, environment_config)`. |
 | `control/skills.py` | `generate_candidates` builds a `CandidateSet` (legal candidates plus a mask and its reasons) from the adapter's catalog. `execute` revalidates, then steps phases one frame at a time with interrupt rules and a hard cap, and returns an `ExecutionResult`. `stale_fallback` is the real-time fallback. See `docs/skills.md`. |
-| `control/goals.py` | `GoalManager`: candidate goals from observed targets (`TargetMemory`), the goal lifecycle, shared debounced and capped planning triggers, validation, retry and deterministic fallback, and the route waypoint on graph arms. See `docs/planner.md`. |
+| `control/goals.py` | `GoalManager`: candidate goals from observed targets (`TargetMemory`), the goal lifecycle, shared debounced and capped planning triggers, validation, retry and deterministic fallback, the planner's map and waypoints, the route waypoint on graph arms, and the threat screen on the candidates. See `docs/planner.md`. |
+| `control/level_map.py` | The explored level map for the planner: every screen of the level seen so far. See `docs/planner.md`. |
+| `control/threats.py` | Threat prediction: plasma and monster motion, each skill's simulated path, first contact, the candidate screen and the `threat_incoming` interrupt test. See `docs/skills.md`. |
 | `control/predicates.py` | A registry of named `Observation` predicates used for preconditions and phase `until` conditions. |
 | `memory/working.py` | `WorkingMemory`: the latest observation, goal, a bounded recent-history deque, derived motion, and progress/stuck/repetition counters. `context()` is the deterministic `MemoryContext` given to controllers. See `docs/memory.md`. |
 | `memory/detector.py` | `EventDetector`: `inventory_changed` and `area_discovered` events from consecutive observations. |
 | `memory/episodes.py` | `EpisodeStore`: the versioned SQLite schema with foreign keys and the JSONL export. `EpisodeRecorder`: batched, write-only episode logging. |
-| `memory/graph.py` | `WorldGraph`: a NetworkX `MultiDiGraph` of platform segments (deterministic segmentation of observed tiles) and observed skill transitions, with raw success, failure and fatal counts and evidence. See `docs/graph.md`. |
+| `memory/graph.py` | `GraphStore` (one graph per level) of `WorldGraph`s: a NetworkX `MultiDiGraph` of platform segments (deterministic segmentation of observed tiles) and observed skill transitions, with raw success, failure and fatal counts and evidence. See `docs/graph.md`. |
+| `control/experience.py` | Experience notes on each offered candidate before a model decision: what the skill did from this tile earlier in the episode (every arm, from working memory) and from this platform in past runs (graph arms, from the graph at episode start). Notes only; nothing is masked. See `docs/memory.md`. |
 | `control/reach.py` | Estimated reachability over the observed tiles: a tick-by-tick simulation of the catalog's jump shapes, walks and falls with measured movement (`skills.reach`), a cheapest path to the goal, the next landing spot (the goal waypoint) and each candidate's estimated end tile. It is an estimate, checked against real-game landings, not a learned route. |
 | `memory/routes.py` | `find_route`: deterministic Dijkstra with inventory filtering, the trophy-gated exit, and an unreachable/frontier result. `RouteTracker` gives replan triggers. |
-| `memory/persistence.py` | Versioned JSON graph checkpoints with atomic save and `.bak`, compatibility rejection, and a YAML export. |
+| `memory/persistence.py` | Versioned JSON graph checkpoints with atomic save and `.bak`, compatibility rejection, and a YAML export; a store is a directory with one checkpoint per level (a legacy combined file is split on load). |
 | `models/base.py` | `TacticalController` protocol: `decide(observation, goal, candidates, memory) -> (Decision, calls)`, every model call made for the decision (retries included). |
 | `models/tactical.py` | `tactical_request` (the one request every tactical model sees), the provider-neutral prompt text, `context_digest`, `parse_tactical`, `ModelController` (shared retry, deterministic legal fallback, per-episode call/token/cost budgets), `SeededMockModel` and `ScriptedTacticalModel`. See `docs/tactical.md`. |
 | `models/planner.py` | `StrategicPlanner` protocol (`propose(request, feedback) -> (text, ModelCallRecord)`), `PlanningRequest`, `GoalCandidate`, `parse_plan`, plus the offline `RuleMockPlanner` and the test `ScriptedPlanner`. |
@@ -50,10 +53,16 @@ adapter.reset ─► GoalManager.reset ─► (planner on trigger) ─► Workin
 | `models/mock.py` | `SeededMockController`, a seeded uniform mock used directly by tests. The CLI uses the equivalent `SeededMockModel` inside `ModelController`; arms A and B use the same seed, so offline trajectories match. |
 | `models/jev.py` | The Jev decisions contract (`JevResponse`, `parse_choice`), `JevClient` (OpenRouter `alpha/decisions`) and `JevTacticalModel` (arms B and C: the arm A request as Jev state, one `choice` question over the offered ids). |
 | `runner/episode.py` | `run_episode`: the shared loop. It records a `CandidateRecord` (IDs, mask and digest) and an `ExecutionResult` for every decision, forces single-candidate decisions without a model call, updates working memory, runs the optional goal manager (`result.planning`) and feeds the optional recorder. |
+| `runner/session.py` | The episode setup shared by `play`, `benchmark` and `train-memory`: `build_models` (an arm's planner and `ModelController`; live builders check credentials first), `run_trial` (one logged episode with the shared goal manager; graph read on graph arms, updated only when learning) and the `play` summary. |
+| `runner/benchmark.py` | `BenchmarkRunner`: paired trials with a seeded arm-order shuffle, per-episode isolation, cold and warm memory regimes, the manifest, `episodes.jsonl` written as it goes, and the paid-run ceiling. Also `train_memory` and `resummarize`. See `docs/benchmark.md`. |
+| `evaluation/metrics.py` | `episode_record`: one flat record per episode (outcome, primary and secondary metrics, cost reported, estimated or unknown, the repeated-failure key). `VOLATILE_FIELDS` lists the clock- and machine-dependent fields. |
+| `evaluation/statistics.py` | Stdlib statistics on episode-level values: percentiles, Wilson interval, seeded bootstrap of a mean, exact McNemar. |
+| `evaluation/summary.py` | `summarize`: per-group and per-arm summaries and paired arm comparisons; writes `summary.json`, `summary.csv` and `pairs.csv`. |
+| `runner/inspect.py` | The decision inspector: replays a recorded episode with its recorded choices (`ReplayPlanner`, `ReplayController`), checks every rebuilt tactical request against the recorded `context_digest`, and writes per-decision bundles (exact Jev and Azure bodies, recorded answer, planner request, real outcome of every candidate, screenshot; opt-in live `--ask`). Viewed with `frontend/` (Next.js). See `docs/inspector.md`. |
 | `runner/replay.py` | `replay_episode`: re-executes an exported episode and reports any mismatch with the recorded candidates, outcomes or observations. |
 | `config.py` | Loads `configs/experiments.yaml` and its sibling files (`environment`, `models`, `skills`) into one validated `AppConfig`. Errors name the file and key. |
 | `logging_setup.py` | Redacts API keys and bearer tokens from log output. |
-| `cli.py` | `dave-agent probe` and `play` (each with `--adapter fixture\|dave` and `--scenario`; `play` also takes `--store`, `--run-id`, `--graph`, `--planner mock\|live` and `--tactical mock\|live`), plus `probe-provider --provider azure\|jev [--purpose planner\|tactical] [--save-fixture]`, `export`, `replay` and `graph`. |
+| `cli.py` | `dave-agent probe` and `play` (each with `--adapter fixture\|dave` and `--scenario`; `play` also takes `--store`, `--run-id`, `--graph`, `--planner mock\|live` and `--tactical mock\|live`), plus `probe-provider --provider azure\|jev [--purpose planner\|tactical] [--save-fixture]`, `export`, `replay`, `graph`, and the Phase 9 `benchmark`, `summarize` and `train-memory` (`docs/benchmark.md`). |
 
 ## Game bridge (outside the package)
 
@@ -73,3 +82,4 @@ adapter.reset ─► GoalManager.reset ─► (planner on trigger) ─► Workin
 - The local-observed region never contains tiles outside the view window.
 - Episodes on both adapters are deterministic per (scenario, seed, controller seed). Snapshots restore an identical future.
 - Dave observations include only viewport tiles and on-screen entities.
+- A mock benchmark reproduces its manifest, records and summaries apart from the declared volatile fields. Arms never share a graph, warm checkpoints stay byte-identical, every failed episode is recorded, and unpriced live arms are refused before any call (`tests/integration/test_benchmark_mock.py`, `test_benchmark_metrics.py`).

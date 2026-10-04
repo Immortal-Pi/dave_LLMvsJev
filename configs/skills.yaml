@@ -7,6 +7,15 @@
 skills:
   executor:
     hazard_radius_px: 48   # new_hazard_nearby: 3 tiles, centre-to-centre on either axis
+    # Threat prediction (control/threats.py, docs/skills.md): plasma flies 2 px/tick (plasma.c),
+    # monsters are extrapolated linearly. Candidates predicted to touch a threat or hazard are
+    # masked unless all do; threat_incoming stops a walk or wait when contact is this close.
+    threats:
+      horizon_ticks: 48
+      margin_px: 2
+      monster_growth_ticks: 8
+      interrupt_ticks: 16
+      mask: true
 
   # Movement for reachability waypoints (control/reach.py), measured on level 1 (2026-10-03):
   # arc_px = rise above the start by tick after Up (flat-floor jump, lands at tick 94); air
@@ -23,6 +32,7 @@ skills:
       short_hold_ticks: 32
       body_px: [4, 11]
       foot_px: [4, 8]
+      head_px: [4, 9]  # dave.c dave_collision_top: (x+4, y+1) and (x+9, y+1)
 
   catalogs:
     # Synthetic test platformer (not Dangerous Dave); unchanged since Phase 1.
@@ -41,25 +51,25 @@ skills:
         description: walk left about 1 tile
         preconditions: [alive]
         phases: [{buttons: [left], ticks: 24}]
-        interrupt_on: [death, terminal, hazard_contact, new_hazard_nearby]
+        interrupt_on: [death, terminal, hazard_contact, new_hazard_nearby, threat_incoming]
       - name: move_right_1
         kind: single
         description: walk right about 1 tile
         preconditions: [alive]
         phases: [{buttons: [right], ticks: 24}]
-        interrupt_on: [death, terminal, hazard_contact, new_hazard_nearby]
+        interrupt_on: [death, terminal, hazard_contact, new_hazard_nearby, threat_incoming]
       - name: move_left_3
         kind: single
         description: walk left about 3 tiles
         preconditions: [alive]
         phases: [{buttons: [left], ticks: 72}]
-        interrupt_on: [death, terminal, hazard_contact, new_hazard_nearby]
+        interrupt_on: [death, terminal, hazard_contact, new_hazard_nearby, threat_incoming]
       - name: move_right_3
         kind: single
         description: walk right about 3 tiles
         preconditions: [alive]
         phases: [{buttons: [right], ticks: 72}]
-        interrupt_on: [death, terminal, hazard_contact, new_hazard_nearby]
+        interrupt_on: [death, terminal, hazard_contact, new_hazard_nearby, threat_incoming]
 
       # A jump starts when Up is pressed on the ground and the hidden landing cooldown
       # (5 ticks) has expired. Up is released as soon as the jump starts, because holding
@@ -125,9 +135,9 @@ skills:
         description: release all keys for 6 ticks (covers the landing cooldown)
         preconditions: [alive]
         phases: [{buttons: [], ticks: 6}]
-        interrupt_on: [death, terminal, hazard_contact, new_hazard_nearby]
+        interrupt_on: [death, terminal, hazard_contact, new_hazard_nearby, threat_incoming]
       - name: wait_long
         kind: single
         description: release all keys for 24 ticks
         phases: [{buttons: [], ticks: 24}]
-        interrupt_on: [death, terminal, new_hazard_nearby]
+        interrupt_on: [death, terminal, new_hazard_nearby, threat_incoming]

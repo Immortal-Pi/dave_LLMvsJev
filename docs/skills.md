@@ -41,10 +41,11 @@ Dave's hitbox is 20 px wide, wider than a tile. Starting a long jump right next 
   | `terminal` | The level ends. |
   | `hazard_contact` | Dave starts burning; death is then certain and input is ignored. |
   | `new_hazard_nearby` | A monster or plasma that was not visible at skill start comes within `executor.hazard_radius_px` (48 px) of Dave on both axes. |
+  | `threat_incoming` | While Dave stands, a monster or plasma is predicted to touch him within `executor.threats.interrupt_ticks` (16) if he stays put. Threats already predicted when the skill started are skipped, because the choice saw them (see "Threat prediction"). |
 
   The rules are identical for every arm.
 - **Revalidation:** before the first input, the candidate's preconditions are re-checked on the latest observation. A candidate whose `max_frames` differs from the catalog is also rejected.
-- **No reflexes:** the executor never chooses inputs of its own. Avoiding enemies is the controller's job.
+- **No reflexes:** the executor never chooses inputs of its own. Avoiding enemies is the controller's job; the threat screen below only removes options.
 - **Paused mode** (default): the game advances only inside `execute`, so it is frozen while a model decides.
 - **Real-time mode** (Phase 11): a stale decision will be replaced by `stale_fallback()`, the first offered candidate that presses no buttons (a wait).
 - **Forced decisions:** when exactly one candidate is legal (for example `wait_long` while burning), the runner picks it without a model call and marks it `Decision.forced=True`. This applies to every arm.
@@ -68,6 +69,33 @@ A predicate whose field is unavailable returns False, so the skill is masked rat
 | `facing_side` | `facing` is left or right (the gun cannot fire while facing front) |
 | `no_bullet` | there is no `bullet` entity. A live bullet is always inside the viewport, because bullets die at the screen edge. |
 
+## Threat prediction and the candidate screen
+
+`src/dave_agent/control/threats.py`, settings in `skills.executor.threats` (`configs/skills.yaml`). It is shared by every arm and uses only the observation and the goal manager's memory of seen cells.
+
+- **Dave's path:** `control/reach.py` `trace_skill` gives Dave's pixel position after every tick of a skill. It reads the skill's phases and follows the game's rules (dave.c):
+  - the jump arc, with 1 px/tick air control;
+  - the ceiling test at x+4 and x+9, which a jump slips past when the held direction clears it 2 px ahead;
+  - side tests between y+2 and y+15;
+  - walking at 2 px per 3 ticks;
+  - free fall at 1 px/tick. Entering a fall faces Dave front. A key turns him, and from then on he drifts 1 px/tick that way with no key held.
+
+  A skill that ends in the air is followed until Dave lands. A short jump stopped early by a ceiling keeps walking for the rest of its hold.
+- **Threats:**
+  - Plasma flies straight at 2 px/tick (plasma.c) until its leading edge enters a brick. Before its velocity is known, it is assumed to fly toward Dave.
+  - Monsters are extrapolated linearly from their per-tick velocity. Their box grows 1 px per `monster_growth_ticks` ahead.
+  - Plasma is checked over the whole path, monsters within `horizon_ticks`. After the path ends, Dave is assumed to stand still until the look-ahead ends.
+- **Boxes** (the game's collision boxes, grown by `margin_px`):
+  - Dave: x+2, y+2, 14×16;
+  - plasma: 20×3;
+  - monsters: 24×21;
+  - hazard cells: x+4..x+12 at full height, which covers fire and vines (water is smaller).
+- **Screen:** `assess` returns each candidate's first contact. `GoalManager.annotate` leads the description with `danger: touches plasma in 14 ticks` (or ends it with `no threat predicted`). It then drops every candidate with a contact, unless all have one, in which case the candidates whose contact comes latest are kept. The drop is recorded as a `candidates_screened` event (`{masked: {id: "threat:<what>@<tick>"}, kept}`). The offered set and its digest are taken before the screen, which depends only on shared observations, so it replays exactly. It applies while Dave stands on a known cell or free-falls. While falling, both the drifting and non-drifting case are tried, because the observation does not tell them apart. Mid-jump it does not apply, because the remaining arc is unknown.
+- **Checked against the real game** (2026-10-03, 300 random catalog skills on levels 1–3):
+  - every one of the 8 burns was predicted, with no false alarms;
+  - the end position matched within 2 px for 88% of skills.
+  - Long mock runs on levels 2 and 3 (18,000 frames each) went from 4 and 2 deaths to none.
+
 ## Dave catalog
 
 | Skill | Kind | Preconditions | Phases (buttons → length) | Max frames |
@@ -81,7 +109,7 @@ A predicate whose field is unavailable returns False, so the skill is masked rat
 | `wait_short` | single | alive | none → 6 ticks (covers the 5-tick landing cooldown) | 6 |
 | `wait_long` | single | — (always legal) | none → 24 ticks | 24 |
 
-- All Dave skills interrupt on `death`, `terminal` and `new_hazard_nearby`.
+- All Dave skills interrupt on `death`, `terminal` and `new_hazard_nearby`; walks and waits also on `threat_incoming`.
 - `move_*`, `jump_*` and `wait_short` also interrupt on `hazard_contact`.
 - `shoot` interrupts on `death` and `terminal` only.
 - `wait_long` omits `hazard_contact`, so it can wait out a burn.
@@ -96,5 +124,6 @@ The fixture catalog keeps its Phase 1 skills (1–3 frame holds), so fixture res
 - **Level 1 is completable with the catalog** (`scripts/try_skills.py`, deterministic, 554 frames):
   `move_right_3 move_right_3 move_right_1 jump_right jump_right jump_left jump_right move_right_3 move_left_3 move_left_3`.
   This walks right, jumps onto the row-8 platform (11,7) and the pillar (13,5), takes the trophy from the pillar (11,3), lands at (16,7), drops through the gap at column 17 and walks left into the door.
+- **Level 2 is completable with the catalog** (`scripts/search_route.py --scenario level2`, a breadth-first search over catalog skills on the real game; 37 skills, 1928 frames, route in `artifacts/search/level2-tile.json`). It starts with a zig-zag climb of alternating short hops right and left, and needs backtracking after the trophy.
 - Every recent-history entry shown to the planner and tactical models carries `moved_px`, the observed displacement. `[0, 0]` marks a skill that did not move Dave: a walk into a wall, or a jump blocked by the tile above. Those skills still report `completed`, because nothing failed.
 - Climbing and jetpack skills are absent until verified.

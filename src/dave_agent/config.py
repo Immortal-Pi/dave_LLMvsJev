@@ -31,11 +31,22 @@ class EnvironmentConfig(Strict):
 ReasoningEffort = Literal["none", "minimal", "low", "medium", "high"]
 
 
+class PriceConfig(Strict):
+    """User-supplied token prices for a provider that reports no cost. Costs computed from it are
+    labeled ``estimated`` and carry ``source`` and ``as_of``; nothing here is a measured charge."""
+
+    input_per_mtok: Annotated[float, Field(ge=0)]   # USD per 1M prompt tokens
+    output_per_mtok: Annotated[float, Field(ge=0)]  # USD per 1M completion tokens (reasoning included)
+    source: str = Field(min_length=1)
+    as_of: str = Field(min_length=1)
+
+
 class AzureModelConfig(Strict):
     provider: Literal["azure_openai"]
     deployment_env: str
     max_completion_tokens: PositiveInt  # includes reasoning tokens
     reasoning_effort: ReasoningEffort | None  # None: omit the parameter
+    price: PriceConfig | None = None  # None: cost unknown (never assumed)
 
 
 class JevModelConfig(Strict):
@@ -54,7 +65,7 @@ class ModelsConfig(Strict):
 
 
 MAX_SKILL_FRAMES = 600
-InterruptReason = Literal["death", "terminal", "hazard_contact", "new_hazard_nearby"]
+InterruptReason = Literal["death", "terminal", "hazard_contact", "new_hazard_nearby", "threat_incoming"]
 
 
 class SkillPhase(Strict):
@@ -107,10 +118,22 @@ class SkillSpec(Strict):
         return self
 
 
+class ThreatConfig(Strict):
+    """Threat prediction (control/threats.py): plasma flies straight at 2 px/tick until a brick;
+    monsters are extrapolated linearly, so their box grows with the look-ahead."""
+
+    horizon_ticks: PositiveInt = 48  # look-ahead for monsters (plasma: the whole skill)
+    margin_px: NonNegativeInt = 2  # added on every side of every box
+    monster_growth_ticks: PositiveInt = 8  # a monster's box grows 1 px per this many ticks ahead
+    interrupt_ticks: PositiveInt = 16  # threat_incoming: predicted contact within this many ticks
+    mask: bool = True  # drop candidates predicted to touch a threat or hazard (unless all do)
+
+
 class ExecutorConfig(Strict):
     # new_hazard_nearby: a monster or plasma that was not visible when the skill started
     # comes within this many pixels (centre distance per axis) of Dave.
     hazard_radius_px: PositiveInt
+    threats: ThreatConfig = Field(default_factory=ThreatConfig)
 
 
 class ReachConfig(Strict):
@@ -123,6 +146,7 @@ class ReachConfig(Strict):
     short_hold_ticks: PositiveInt  # how long the *_short jumps hold the direction
     body_px: tuple[NonNegativeInt, NonNegativeInt]  # x offsets of the wall-collision box's left/right edge
     foot_px: tuple[NonNegativeInt, NonNegativeInt]  # x offsets of the two points that need ground under them
+    head_px: tuple[NonNegativeInt, NonNegativeInt] = (4, 9)  # x offsets of the ceiling test points (dave.c)
 
 
 class SkillsConfig(Strict):
@@ -223,6 +247,9 @@ class BenchmarkConfig(Strict):
     max_episode_wall_seconds: PositiveInt
     paid_run_budget_usd: Annotated[float, Field(ge=0)]
     randomize_arm_order: bool
+    seed: NonNegativeInt = 0  # base seed: trial k uses seed + k; also seeds arm order and the bootstrap
+    confidence: Annotated[float, Field(gt=0, lt=1)] = 0.95
+    bootstrap_samples: PositiveInt = 2000
 
 
 class ArmConfig(Strict):

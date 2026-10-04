@@ -48,15 +48,24 @@ class PlanningRequest(Contract):
     current_goal: str | None  # target_ref of the goal still active (soft triggers)
     candidates: tuple[GoalCandidate, ...]
     graph_routes: bool
+    # The explored level map (control/level_map.py): every screen of this level seen so far.
+    map: dict[str, Any] | None = None
+    waypoints: tuple[tuple[int, int], ...] = ()  # the active goal's planner waypoints still ahead
 
     @property
     def candidate_ids(self) -> tuple[str, ...]:
         return tuple(c.candidate_id for c in self.candidates)
 
 
+MAX_WAYPOINTS = 5
+
+
 class PlanChoice(Contract):
     goal: str = Field(min_length=1, max_length=128)
     rationale: str = Field(default="", max_length=500)
+    # Optional intermediate standing tiles [col, row] on the way to the goal, in order. The goal
+    # manager checks each against the explored map before the tactical model follows them.
+    waypoints: tuple[tuple[int, int], ...] = Field(default=(), max_length=MAX_WAYPOINTS)
 
 
 class PlanOutputError(ValueError):
@@ -73,7 +82,8 @@ def parse_plan(text: str | None, allowed: tuple[str, ...]) -> PlanChoice:
     try:
         choice = PlanChoice.model_validate(data)
     except ValidationError as exc:
-        raise PlanOutputError(f"output does not match {{goal, rationale}}: {exc.errors()[0]['msg']}") from exc
+        raise PlanOutputError(f"output does not match {{goal, rationale, waypoints}}: "
+                              f"{exc.errors()[0]['msg']}") from exc
     if choice.goal not in allowed:
         raise PlanOutputError(f"goal {choice.goal!r} is not an offered candidate; choose one of {list(allowed)}")
     return choice
