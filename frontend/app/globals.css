@@ -806,3 +806,67 @@ main:has(.live) {
 .key.screen {
   border: 1.5px dashed var(--accent);
 }
+.level-map .plan-path.unknown {
+  stroke: var(--danger);
+  stroke-dasharray: 3 3;
+}
+.level-map .platform-reach {
+  fill: none;
+  stroke: var(--ok);
+  stroke-width: 1;
+  opacity: 0.55;
+}
+.level-map .failed-link {
+  stroke: var(--danger);
+  stroke-width: 1.5;
+  opacity: 0.7;
+}
+.level-map .arrow-failed {
+  fill: var(--danger);
+}
+.level-map .arrow-threat {
+  fill: var(--warn);
+}
+.level-map .failed-link.avoid {
+  stroke-width: 2.5;
+  opacity: 0.9;
+}
+.level-map .threat-path {
+  fill: none;
+  stroke: var(--warn);
+  stroke-width: 2;
+}
+.level-map .death-mark path {
+  stroke: var(--danger);
+  stroke-width: 2.5;
+  stroke-linecap: round;
+}
+.key.reach {
+  border: 1.5px solid var(--ok);
+}
+.key.failed {
+  background: var(--danger);
+  height: 3px;
+}
+.key.threat {
+  background: var(--warn);
+  height: 3px;
+}
+.tried-list {
+  margin: 0;
+  padding-left: 1.1rem;
+}
+.tried-list li {
+  margin: 0.1rem 0;
+}
+.tried-list .outcome-achieved {
+  color: var(--ok);
+}
+.tried-list .outcome-failed,
+.tried-list .outcome-expired {
+  color: var(--danger);
+}
+.badge.route {
+  background: var(--accent-soft);
+  color: var(--accent);
+}

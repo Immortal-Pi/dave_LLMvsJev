@@ -38,6 +38,38 @@ export type LevelMapView = {
   legend: string;
 };
 
+/** A platform as the planner saw it (control/platforms.py). */
+export type PlatformView = {
+  id: string;
+  row: number;
+  cols: Tile;
+  reachable: boolean;
+  hops?: number;
+  exits: { to: string; by: string; from_col: number; note?: string }[];
+  items?: string[];
+  open?: string[];
+  danger?: string[];
+};
+
+/** One goal tried on this level (control/attempts.py). */
+export type AttemptView = {
+  goal: string;
+  waypoints: Tile[];
+  outcome: string;
+  reason?: string;
+  start: Tile | null;
+  furthest: Tile | null;
+  frames?: number;
+  waypoints_reached?: string;
+};
+
+export type FailedLink = { from: Tile; to: Tile; times: number; how: string[]; avoid: boolean };
+
+/** Estimated move: landing cell and how Dave gets there ("start", walk, fall, jump, unknown). */
+export type PathStep = [number, number, string];
+
+export type ThreatPath = { id: string; kind: string; path: [number, number][] };
+
 export type PlanEvent = {
   frame: number;
   triggers: string[];
@@ -53,8 +85,13 @@ export type PlanEvent = {
   errors: string[];
   model_ms: number;
   calls: CallView[];
-  candidates: { id: string; description: string; route: Record<string, unknown> | null }[];
+  candidates: { id: string; description: string; route: Record<string, unknown> | null; path?: string | null }[];
   map: LevelMapView | null;
+  platforms?: PlatformView[];
+  tried?: AttemptView[];
+  failed_links?: FailedLink[];
+  path?: PathStep[];
+  deaths?: { cause: string; tile: Tile | null }[];
 };
 
 export type DecisionEvent = ObsView & {
@@ -68,6 +105,7 @@ export type DecisionEvent = ObsView & {
   fallback_reason: string | null;
   probabilities: Record<string, number> | null;
   calls: CallView[];
+  threats?: ThreatPath[];
 };
 
 export type OutcomeEvent = ObsView & {

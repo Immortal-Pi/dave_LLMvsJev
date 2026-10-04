@@ -17,6 +17,10 @@ export function PlannerPanel({ live }: { live: LiveState }) {
   }
   const lastDecision = [...live.feed].reverse().find((i) => i.kind === "decision");
   const heading = lastDecision?.kind === "decision" ? lastDecision.d.goal?.waypoint ?? null : null;
+  const threats = lastDecision?.kind === "decision" ? lastDecision.d.threats ?? [] : [];
+  const chosenPath = plan.candidates.find((c) => c.id === plan.chosen)?.path ?? null;
+  const tried = plan.tried ?? [];
+  const failed = plan.failed_links ?? [];
   const route = plan.route as { status?: string; steps?: number; reason?: string; incidents?: { cause: string; tile: number[] }[] } | null;
   const who = plan.calls[0]?.provider === "mock" ? "Rule planner (mock)" : plan.fallback ? "Fallback" : "LLM planner";
   return (
@@ -28,14 +32,18 @@ export function PlannerPanel({ live }: { live: LiveState }) {
         <div className="map-wrap">
           {plan.map ? (
             <LevelMap map={plan.map} dave={live.now?.tile ?? null} waypoints={plan.waypoints}
-                      goal={goalTile(plan.chosen)} heading={heading} />
+                      goal={goalTile(plan.chosen)} heading={heading} path={plan.path} platforms={plan.platforms}
+                      failed={failed} deaths={plan.deaths} threats={threats} />
           ) : (
             <p className="muted">No map yet.</p>
           )}
           <p className="small muted legend-line">
             <span className="key dave" /> Dave now <span className="key path" /> planner&apos;s path
             <span className="key wp" /> waypoints <span className="key goal" /> goal <span className="key heading" />
-            engine heading to <span className="key screen" /> on screen · ? not seen yet
+            engine heading to <span className="key reach" /> reachable platform <span className="key failed" />
+            move that failed here (stuck or died) <span className="key threat" /> predicted path of a shot or monster
+            ✕ death <span className="key screen" /> on screen · ? not seen yet · jumps are arcs, a red dashed leg has no
+            known way
           </p>
         </div>
         <dl className="facts">
@@ -62,6 +70,10 @@ export function PlannerPanel({ live }: { live: LiveState }) {
             <dd>{plan.waypoints.length ? plan.waypoints.map((w, i) => `${i + 1}: ${fmtTile(w)}`).join("  →  ") : "none (engine follows its own route)"}</dd>
           </div>
           <div className="fact-row">
+            <dt>Path estimate</dt>
+            <dd className="mono small">{chosenPath ?? "—"}</dd>
+          </div>
+          <div className="fact-row">
             <dt>Engine heading to</dt>
             <dd>{fmtTile(heading)}</dd>
           </div>
@@ -77,6 +89,36 @@ export function PlannerPanel({ live }: { live: LiveState }) {
                     {route.incidents.length} past deaths: {route.incidents.map((i) => `${i.cause} ${fmtTile(i.tile as [number, number])}`).join(", ")}
                   </span>
                 ) : null}
+              </dd>
+            </div>
+          ) : null}
+          {tried.length ? (
+            <div className="fact-row">
+              <dt>Tried this level</dt>
+              <dd className="small">
+                <ol className="tried-list">
+                  {tried.map((a, i) => (
+                    <li key={i}>
+                      <span className="mono">{a.goal}</span>{" "}
+                      <span className={`outcome-${a.outcome}`}>{a.outcome}</span>
+                      {a.reason ? ` (${a.reason})` : ""}
+                      {a.waypoints_reached ? ` · waypoints ${a.waypoints_reached}` : ""}
+                      {a.furthest ? ` · got to ${fmtTile(a.furthest)}` : ""}
+                    </li>
+                  ))}
+                </ol>
+              </dd>
+            </div>
+          ) : null}
+          {failed.length ? (
+            <div className="fact-row">
+              <dt>Failed moves</dt>
+              <dd className="small">
+                {failed.map((f, i) => (
+                  <span key={i} className={f.avoid ? "badge warn" : "chip"}>
+                    {fmtTile(f.from)} → {fmtTile(f.to)} ×{f.times} ({f.how.join(", ")}){f.avoid ? " avoid" : ""}
+                  </span>
+                ))}
               </dd>
             </div>
           ) : null}

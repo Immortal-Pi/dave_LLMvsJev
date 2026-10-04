@@ -34,6 +34,7 @@ from dave_agent.config import ExecutorConfig, SkillSpec
 from dave_agent.control.experience import annotate_experience
 from dave_agent.control.goals import GoalManager, PlanningRecord, PlanningStep
 from dave_agent.control.skills import ExecutionResult, execute, generate_candidates
+from dave_agent.control.threats import positions, threats
 from dave_agent.memory.detector import EventDetector
 from dave_agent.memory.episodes import EpisodeRecorder
 from dave_agent.memory.graph import GraphStore
@@ -312,9 +313,32 @@ def _plan_view(step: PlanningStep) -> dict[str, Any]:
             "waypoints": goal.get("waypoints") or [], "route": r.route, "fallback": r.fallback,
             "fallback_reason": r.fallback_reason, "attempts": r.attempts, "errors": r.errors,
             "model_ms": r.model_ms, "calls": [_call_view(c) for c in step.calls],
-            "candidates": [{"id": c.candidate_id, "description": c.description, "route": c.route}
+            "candidates": [{"id": c.candidate_id, "description": c.description, "route": c.route, "path": c.path}
                            for c in r.request.candidates],
-            "map": r.request.map}
+            "map": r.request.map, "platforms": list(r.request.platforms), "tried": list(r.request.attempts),
+            "failed_links": list(r.request.failed_links), "path": goal.get("path") or [],
+            "deaths": goal.get("deaths") or []}
+
+
+THREAT_VIEW_TICKS = 96  # how far ahead the viewer draws each visible threat's predicted path
+THREAT_VIEW_STEP = 4
+
+
+def _threat_view(obs) -> list[dict[str, Any]]:
+    """Each visible threat's predicted path (centres in tile units, every few ticks) as the
+    threat screen predicts it (control/threats.py); for the viewer only."""
+    cells = {(t.pos.col, t.pos.row): t.kind for t in obs.tiles}
+    out = []
+    for t in threats(obs):
+        w, h = (20, 3) if t.entity_type == "plasma" else (24, 21)
+        pts = [[round((t.x + w / 2) / 16, 2), round((t.y + h / 2) / 16, 2)]]
+        for i, pos in enumerate(positions(t, THREAT_VIEW_TICKS, cells), 1):
+            if pos is None:
+                break
+            if i % THREAT_VIEW_STEP == 0:
+                pts.append([round((pos[0] + w / 2) / 16, 2), round((pos[1] + h / 2) / 16, 2)])
+        out.append({"id": t.entity_id, "kind": t.entity_type, "path": pts})
+    return out
 
 
 def _decision_view(obs, memory: WorkingMemory, candidates, screened: dict[str, str], decision,
@@ -332,7 +356,8 @@ def _decision_view(obs, memory: WorkingMemory, candidates, screened: dict[str, s
                            for c in candidates],
             "screened": screened, "chosen": decision.candidate_id, "forced": decision.forced,
             "fallback": decision.fallback, "fallback_reason": decision.fallback_reason,
-            "probabilities": probabilities, "calls": [_call_view(c) for c in tactical]}
+            "probabilities": probabilities, "calls": [_call_view(c) for c in tactical],
+            "threats": _threat_view(obs)}
 
 
 def _outcome_view(run: ExecutionResult, events: list[Event]) -> dict[str, Any]:

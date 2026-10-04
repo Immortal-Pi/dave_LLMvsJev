@@ -22,13 +22,24 @@ The tactical controller chooses **how** to pursue the planner's goal: one bounde
 | `entities` | visible monsters and shots with tile and velocity |
 | `goal` | goal type, target id, success predicate, `waypoint` and `waypoint_offset` (tiles from Dave), constraints, frames left |
 | `progress`, `recent` | `MemoryContext.progress` and the last `memory.context_entries` skills (outcome, reason, events, end tile) |
-| `candidates` | id, description and frame limit of every offered skill. A skill tried before from here first gets experience notes (this episode for every arm, past runs for graph arms; `docs/memory.md`, "Experience notes"). On Dave the description then ends with the skill's estimated end tile from `control/reach.py` (see `docs/planner.md`, "Reachability waypoints"); the waypoint is the next landing spot on the estimated route, or the planner's next waypoint. A skill predicted to touch plasma, a monster or a hazard is led by `danger: touches … in N ticks`; such skills are removed before the request is built, unless every skill has a contact (`docs/skills.md`, "Threat prediction and the candidate screen"). The others end with `no threat predicted` |
+| `candidates` | id, description and frame limit of every offered skill. A skill tried before from here first gets experience notes (this episode for every arm, past runs for graph arms; `docs/memory.md`, "Experience notes"). On Dave the description then ends with the skill's estimated end tile, simulated from Dave's pixel position (`estimate_end_at`, `control/reach.py`; see `docs/planner.md`, "Reachability waypoints"). The waypoint is the next landing spot on the estimated route, toward the planner's next waypoint while it gave any. The skills that carry out that next move are led by a `route:` note (see "Route notes" below). A skill predicted to touch plasma, a monster or a hazard is led by `danger: touches … in N ticks`; such skills are removed before the request is built, unless every skill has a contact (`docs/skills.md`, "Threat prediction and the candidate screen"). The others end with `no threat predicted` |
 
 There are no tools, no free-form planning and no growing transcript: each call sees one request.
 
 The provider-neutral text lives in `models/tactical.py` and is sent to every provider: `GAME_RULES` (shared with the planner), `INPUT_GUIDE` (what each field means, including the grid legend) and `TACTICAL_TASK`.
 
 **Context digest.** `context_digest(request)` is a sha256 prefix of the canonical request JSON, without the episode id. `ModelController` puts it on every decision (`Decision.context_digest`, stored in `decisions.context_digest`; NULL for forced decisions). Two arms with equal digests at a decision were shown identical context. This is how A/B/C parity shows in the logs (tested in `test_arm_parity.py`).
+
+## Route notes: following the plan
+
+The tactical model only sees the goal, one waypoint and the offered skills, so a planned route has to reach it through the options. With a reach envelope, `GoalManager._route_notes` (`control/goals.py`) takes the first move of the estimated path to the waypoint and marks, for every arm alike:
+- the skills whose estimated end is that move's landing: `route: makes the next move (jump to [8, 4])`;
+- else the walks that keep Dave on his platform and end where one of the catalog's jumps would make the move (simulated from that spot): `route: walks to the take-off for the jump to [8, 4]`. A jump that only works from a platform's end needs this walk first (level 2: `move_right_1` from x 56 to x 72 on the ledge at (4,3), then `jump_right`);
+- when only walking is left, the walks toward the waypoint: `route: toward [x, y]`.
+
+The note leads the description (after a `danger:` note), and the task text says to prefer a `route:` option unless it is dangerous. Masked skills stay masked.
+
+**Checked on the real game:** a scripted controller that always takes the first `route:` option (random otherwise), with the rule planner, completes level 1 and level 2 with no deaths; on level 2 its first seven moves are the opening of the breadth-first search route. On level 3 it took the gun but not the trophy within 18,000 frames.
 
 ## Output, retry and fallback
 
