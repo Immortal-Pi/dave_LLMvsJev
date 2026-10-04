@@ -10,6 +10,7 @@ from dave_agent.control.goals import GoalManager
 from dave_agent.control.platforms import Platforms
 from dave_agent.control.reach import ReachMap
 from dave_agent.models.planner import ScriptedPlanner
+from dave_agent.schemas import TilePos
 
 from .test_goals import memory
 from .test_graph import obs
@@ -206,3 +207,69 @@ def test_a_fatal_move_is_recorded_as_a_death_and_a_failed_link():
     gm.log.links.clear()
     gm._record_death(level2(player=(5, 3), state="burning"), None, (4, 7), (2, 5))  # nothing touches him here
     assert gm.log.deaths[-1]["cause"] == "unknown" and gm.log.failed_links()[0]["how"] == ["death: unknown"]
+
+
+# -- following the plan ----------------------------------------------------------------------
+def at_px(x, y, **kw):
+    from dave_agent.schemas import PixelPos
+
+    o = level2(**kw)
+    return o.model_copy(update={"player_position": PixelPos(x=x, y=y)})
+
+
+def offered(o):
+    from dave_agent.adapters.dave import BUTTONS
+    from dave_agent.control.skills import generate_candidates
+
+    catalog = load_config(Path(__file__).resolve().parents[2] / "configs" / "experiments.yaml").skills \
+        .for_adapter("dave")
+    return list(generate_candidates(catalog, frozenset(BUTTONS), o).candidates), catalog
+
+
+def test_planner_waypoints_are_followed_one_landing_at_a_time():
+    gm, planner, mem, step = started([plan(TROPHY, ["c8r4", [13, 8]])])
+    assert step.events[-1].payload["waypoints"] == [[10, 4], [13, 8]]
+    # Not the far waypoint (10,4) itself: the first landing on the way there.
+    assert (gm.goal.next_waypoint.col, gm.goal.next_waypoint.row) == (4, 7)
+    on_top = level2(player=(10, 4), frame=40, oid=2)  # waypoint 1 reached
+    gm.observe(on_top)
+    gm.update(on_top, mem, [])
+    assert [(w.col, w.row) for w in gm._waypoints] == [(13, 8)]
+    assert (gm.goal.next_waypoint.col, gm.goal.next_waypoint.row) == (11, 6)  # the fall into the pocket first
+
+
+def test_route_notes_mark_the_walk_to_the_ledge_end_then_the_jump():
+    gm, planner, mem, _ = started([plan(TROPHY, ["c8r4"])])
+    mid = at_px(56, 48, player=(4, 3), frame=40, oid=2)  # on the one-tile ledge, not at its end
+    gm.observe(mid)
+    gm.update(mid, mem, [])
+    assert (gm.goal.next_waypoint.col, gm.goal.next_waypoint.row) == (8, 4)
+    candidates, catalog = offered(mid)
+    notes = {c.skill: c.description for c in gm.annotate(mid, candidates, catalog)[0]}
+    assert notes["move_right_1"].startswith("route: walks to the take-off for the jump to [8, 4]")
+    assert not notes["jump_right"].startswith("route:")  # from mid-ledge it falls short
+    edge = at_px(72, 48, player=(4, 3), frame=70, oid=3)
+    candidates, catalog = offered(edge)
+    notes = {c.skill: c.description for c in gm.annotate(edge, candidates, catalog)[0]}
+    assert notes["jump_right"].startswith("route: makes the next move (jump to [8, 4])")
+    marked = {s for s, d in notes.items() if d.startswith("route:")}
+    assert marked == {"jump_right", "jump_right_short"}  # both land on (8,4) from the ledge end
+
+
+def test_failed_moves_are_real_moves_and_clear_once_made():
+    gm, planner, mem, _ = started([plan("explore:right")])
+    # Exploring right: the unseen column 20 has no path, so Dave heads for the nearest platform
+    # whose right end is unexplored (c16r5), one landing at a time.
+    assert (gm.goal.next_waypoint.col, gm.goal.next_waypoint.row) == (4, 7)
+    assert planner.requests[0].candidates[-1].path.endswith("c16r5 (its right end is unexplored)")
+    gm.goal = gm.goal.model_copy(update={"next_waypoint": TilePos(col=20, row=3)})
+    gm._record_stuck(level2(player=(1, 9)), "stuck")
+    assert gm.log.failures() == {}  # no estimated move to an unseen cell: no line to it
+    gm.goal = gm.goal.model_copy(update={"next_waypoint": TilePos(col=4, row=7)})
+    gm._record_stuck(level2(player=(1, 9)), "stuck")
+    assert list(gm.log.failures()) == [((1, 9), (4, 7))]  # the jump itself, from its take-off
+    gm._stand = (1, 9)
+    landed = level2(player=(4, 7), frame=90, oid=4)
+    gm.observe(landed)
+    gm.update(landed, mem, [])
+    assert gm.log.failures() == {}

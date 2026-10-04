@@ -41,8 +41,9 @@ export function PlannerPanel({ live }: { live: LiveState }) {
             <span className="key dave" /> Dave now <span className="key path" /> planner&apos;s path
             <span className="key wp" /> waypoints <span className="key goal" /> goal <span className="key heading" />
             engine heading to <span className="key reach" /> reachable platform <span className="key failed" />
-            failed move <span className="key threat" /> threat path ✕ death <span className="key screen" /> on screen
-            · ? not seen yet · jumps are arcs, red dashes = no known way
+            move that failed here (stuck or died) <span className="key threat" /> predicted path of a shot or monster
+            ✕ death <span className="key screen" /> on screen · ? not seen yet · jumps are arcs, a red dashed leg has no
+            known way
           </p>
         </div>
         <dl className="facts">

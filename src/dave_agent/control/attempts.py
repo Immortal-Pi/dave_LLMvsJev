@@ -80,6 +80,10 @@ class AttemptLog:
         if how not in link["how"]:
             link["how"].append(how)
 
+    def succeed(self, frm: Cell, to: Cell) -> None:
+        """Dave just made this move: it no longer counts as failed."""
+        self.links.pop((frm, to), None)
+
     def failures(self) -> dict[tuple[Cell, Cell], int]:
         """(from, to) -> times failed: the reach estimate's extra cost."""
         return {k: v["times"] for k, v in self.links.items()}

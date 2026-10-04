@@ -46,7 +46,9 @@ INPUT_GUIDE = f"""- `player`: Dave's tile, pixel position (16 px per tile), move
 - `progress` and `recent`: how the last skills went (outcomes, interruptions, deaths). `moved_px` is Dave's displacement during a skill in pixels; [0, 0] means he did not move (blocked by a wall or by the tile above).
 - `candidates`: the only skills you may choose, each with a description and its frame limit."""
 TACTICAL_TASK = ("Choose the skill that best moves Dave toward the waypoint without touching hazards, monsters or "
-                 "plasma. Avoid repeating a skill that keeps failing.")
+                 "plasma. A candidate whose description starts with `route:` carries out the next move of the "
+                 "planned route (or walks to its take-off): prefer it unless it is dangerous. Avoid repeating a "
+                 "skill that keeps failing.")
 
 
 class TacticalRequest(Contract):

@@ -16,6 +16,13 @@ function danger(description: string): string | null {
   return m ? m[1] : null;
 }
 
+/** The goal manager's `route:` note: this option makes the next move of the planned route, or
+ * walks to its take-off (control/goals.py ``_route_notes``). */
+function route(description: string): string | null {
+  const m = description.match(/(?:^|; )route: ([^;]+)/);
+  return m ? m[1] : null;
+}
+
 function Outcome({ o }: { o: OutcomeEvent | null }) {
   if (!o) return <span className="muted small">running…</span>;
   const died = o.events.includes("death") || o.reason === "hazard_contact";
@@ -36,6 +43,7 @@ function DecisionCard({ d, outcome, who }: { d: DecisionEvent; outcome: OutcomeE
   const options = [...d.candidates].sort((a, b) => (probs?.[b.id] ?? 0) - (probs?.[a.id] ?? 0));
   const latency = d.calls.reduce((sum, c) => sum + (c.latency_ms ?? 0), 0);
   const how = d.forced ? "had one option:" : d.fallback ? `fell back (${d.fallback_reason}) to` : "chose";
+  const onRoute = d.candidates.filter((c) => route(c.description)).map((c) => c.id);
   return (
     <article className="card decision-card">
       <header>
@@ -46,6 +54,13 @@ function DecisionCard({ d, outcome, who }: { d: DecisionEvent; outcome: OutcomeE
           · at {fmtTile(d.tile)} · frame {d.frame}
           {latency ? ` · ${Math.round(latency)} ms` : ""}
         </span>
+        {onRoute.length ? (
+          onRoute.includes(d.chosen) ? (
+            <span className="badge ok" title="the chosen skill makes the planned route's next move">on route</span>
+          ) : (
+            <span className="badge warn" title="a skill marked route: was offered but not chosen">off route</span>
+          )
+        ) : null}
       </header>
       {d.goal ? (
         <div className="small muted">
@@ -56,11 +71,13 @@ function DecisionCard({ d, outcome, who }: { d: DecisionEvent; outcome: OutcomeE
         <ul className="options">
           {options.map((c) => {
             const warn = danger(c.description);
+            const step = route(c.description);
             return (
               <li key={c.id} className={c.id === d.chosen ? "chosen" : ""} title={c.description}>
                 <span className="mono skill">{c.skill}</span>
                 {probs ? <ProbabilityBar value={probs[c.id]} highlight={c.id === d.chosen} /> : null}
                 {warn ? <span className="badge warn">{warn}</span> : null}
+                {step ? <span className="badge route" title={step}>route</span> : null}
               </li>
             );
           })}

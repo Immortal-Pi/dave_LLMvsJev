@@ -74,12 +74,21 @@ export function LevelMap({ map, dave, waypoints, goal, heading, path = [], platf
           <title>{`${p.id}: reachable in ${p.hops ?? 0} moves`}</title>
         </rect>
       ))}
+      <defs>
+        <marker id="arrow-failed" viewBox="0 0 6 6" refX="5" refY="3" markerWidth="5" markerHeight="5" orient="auto">
+          <path d="M0,0 L6,3 L0,6 z" className="arrow-failed" />
+        </marker>
+        <marker id="arrow-threat" viewBox="0 0 6 6" refX="5" refY="3" markerWidth="5" markerHeight="5" orient="auto">
+          <path d="M0,0 L6,3 L0,6 z" className="arrow-threat" />
+        </marker>
+      </defs>
       {failed.map((f, i) => {
         const [x1, y1] = at(f.from);
         const [x2, y2] = at(f.to);
         return (
-          <line key={`f${i}`} className={f.avoid ? "failed-link avoid" : "failed-link"} x1={x1} y1={y1} x2={x2} y2={y2}>
-            <title>{`failed ${f.times}x: ${f.how.join(", ")}`}</title>
+          <line key={`f${i}`} className={f.avoid ? "failed-link avoid" : "failed-link"} x1={x1} y1={y1} x2={x2} y2={y2}
+                markerEnd="url(#arrow-failed)">
+            <title>{`move ${f.from.join(",")} → ${f.to.join(",")} failed ${f.times}x: ${f.how.join(", ")}`}</title>
           </line>
         );
       })}
@@ -88,7 +97,8 @@ export function LevelMap({ map, dave, waypoints, goal, heading, path = [], platf
         : straight.length > 1 ? <polyline className="plan-path" points={straight.map((t) => at(t).join(",")).join(" ")} /> : null}
       {threats.map((t) =>
         t.path.length > 1 ? (
-          <polyline key={t.id} className="threat-path" points={t.path.map((p) => atPx(p).join(",")).join(" ")}>
+          <polyline key={t.id} className="threat-path" points={t.path.map((p) => atPx(p).join(",")).join(" ")}
+                    markerEnd="url(#arrow-threat)">
             <title>{`${t.kind}: predicted path`}</title>
           </polyline>
         ) : null,

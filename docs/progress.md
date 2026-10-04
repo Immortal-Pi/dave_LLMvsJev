@@ -351,6 +351,16 @@ Watching level 2 live showed the Azure planner sending Dave through brick pillar
 
 Checks: `tests/unit/test_platforms.py` (11); 297 tests pass; mock runs on levels 2 and 3 (18,000 frames, 0 deaths; the mock tactical model chooses at random, so its score says nothing about planning); the `/live` page checked in headless Chrome. Not run: a paid Azure planner run with the new request.
 
+## Jev follows the plan (2026-10-04)
+
+Live Azure + Jev on level 2 made good plans that Jev did not carry out: after waypoint (34,4) Jev was told "heading to (47,2)" (the next planner waypoint, 12 columns right) and walked off the ledge.
+- **Waypoints followed one landing at a time:** with planner waypoints, the goal's waypoint is the next landing toward the first of them.
+- **`route:` notes** on the options that make the next move, or walk to its take-off (simulated); the tactical task says to prefer them. The viewer shows a `route` badge and "on route" / "off route" per decision.
+- **Explore goals** head for the nearest reachable platform with an unexplored end; the rule planner prefers goals with a known path.
+- **Failed moves** are only estimated moves (no more lines from Dave to off-map targets) and are cleared once made.
+
+Checks: 300 tests pass. A scripted controller that always takes the `route:` option, with the rule planner, completes level 1 and level 2 on the real game with no deaths (level 3: gun, no trophy in 18,000 frames). Not run: a paid live Jev run with the notes.
+
 ## Verification (run 2026-10-03)
 
 ```bash

@@ -274,6 +274,22 @@ def next_waypoint(reach: ReachMap, start: Cell, goal: Cell) -> Cell | None:
 DIRECTIONS = {"left": -1, "right": 1}
 
 
+def frontier(reach: ReachMap, side: int) -> set[Cell]:
+    """Standable cells at the explored map's edge toward ``side`` (-1 left, 1 right): the next
+    cell that way has not been seen. Exploring that way means getting to one of them first."""
+    return {c for c in reach.cells if c[1] >= 1 and reach.standable(c) and (c[0] + side, c[1]) not in reach.cells}
+
+
+def next_landing(reach: ReachMap, start: Cell, targets: set[Cell]) -> Cell | None:
+    """Like ``next_waypoint`` for a set of target cells: the first jump or fall landing on the
+    cheapest path to any of them, the target reached when only walking is left, or None when no
+    path is known or Dave is already on one."""
+    route = reach.path(start, targets)
+    if not route:
+        return None
+    return next((cell for cell, kind in route if kind != "walk"), route[-1][0])
+
+
 def estimate_end(reach: ReachMap, cell: Cell, spec: SkillSpec) -> Cell | None:
     """Estimated standing cell after running ``spec`` from standing at ``cell``, read from the
     skill's own phases: a jump (Up in its first phase) is flown with the direction held for its

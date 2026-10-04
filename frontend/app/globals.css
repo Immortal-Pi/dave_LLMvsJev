@@ -819,8 +819,13 @@ main:has(.live) {
 .level-map .failed-link {
   stroke: var(--danger);
   stroke-width: 1.5;
-  stroke-dasharray: 2 2;
-  opacity: 0.6;
+  opacity: 0.7;
+}
+.level-map .arrow-failed {
+  fill: var(--danger);
+}
+.level-map .arrow-threat {
+  fill: var(--warn);
 }
 .level-map .failed-link.avoid {
   stroke-width: 2.5;
@@ -830,7 +835,6 @@ main:has(.live) {
   fill: none;
   stroke: var(--warn);
   stroke-width: 2;
-  stroke-dasharray: 4 2;
 }
 .level-map .death-mark path {
   stroke: var(--danger);
@@ -861,4 +865,8 @@ main:has(.live) {
 .tried-list .outcome-failed,
 .tried-list .outcome-expired {
   color: var(--danger);
+}
+.badge.route {
+  background: var(--accent-soft);
+  color: var(--accent);
 }

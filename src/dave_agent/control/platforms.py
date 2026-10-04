@@ -16,7 +16,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
 
-from dave_agent.control.reach import Cell, ReachMap
+from dave_agent.control.reach import Cell, ReachMap, frontier
 
 TOP_ROW = 1  # row 0 is above the level's top wall: standable on paper, never reachable
 MAX_PLATFORMS = 40
@@ -133,11 +133,20 @@ class Platforms:
             prev = cell
         return " ".join(parts)
 
-    def path_note(self, target: Cell) -> str:
+    def path_note(self, target: Cell, explore: int = 0) -> str:
         """How Dave gets from ``here`` to take something at ``target``, as a platform chain, or
-        why no path is known."""
+        why no path is known. ``explore`` (-1 left, 1 right): the target is unexplored, so the
+        path leads to the nearest reachable platform with an unexplored end that way."""
         if self.here is None or self.of(self.here) is None:
             return "unknown: Dave is not standing on a known platform"
+        if explore:
+            side = "right" if explore > 0 else "left"
+            steps = self.reach.path(self.here, frontier(self.reach, explore))
+            if steps is None:
+                return f"no reachable platform with an unexplored end to the {side}"
+            if not steps:
+                return f"Dave is at an unexplored end: walk {side}"
+            return f"{self.chain(steps, self.here)} (its {side} end is unexplored)"
         steps = self.reach.path(self.here, self.reach.targets_for(target))
         if steps is not None:
             return self.chain(steps, self.here) + (" (already there)" if not steps else "")

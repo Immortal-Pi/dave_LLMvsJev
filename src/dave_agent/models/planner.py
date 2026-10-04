@@ -122,8 +122,9 @@ def priority(candidate: GoalCandidate) -> int:
 
 
 def rule_choice(candidates: tuple[GoalCandidate, ...], avoid: str | None = None) -> GoalCandidate:
-    """First candidate by priority, skipping ``avoid`` (a goal that just failed) when possible."""
-    ranked = sorted(candidates, key=priority)
+    """First candidate by priority, skipping ``avoid`` (a goal that just failed) when possible.
+    With path estimates (control/platforms.py), goals with a known path come first."""
+    ranked = sorted(candidates, key=lambda c: (bool(c.path and c.path.startswith("no known path")), priority(c)))
     return next((c for c in ranked if c.candidate_id != avoid), ranked[0])
 
 
