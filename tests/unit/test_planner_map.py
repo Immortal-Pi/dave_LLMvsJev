@@ -42,10 +42,13 @@ def test_invalid_waypoints_are_sent_back_then_dropped(config):
     bad = [(4, 2), (6, 1)]  # (4, 2) is in mid-air: nothing to stand on
     gm, planner, mem, step = started(config, [plan("collect:trophy:c6:r1", bad), plan("collect:trophy:c6:r1", bad)])
     assert [c.status for c in step.calls] == ["invalid_output", "invalid_output"]
-    assert "[[4, 2]]" in planner.feedback[1] and "above a '#'" in planner.feedback[1]
-    # Retries spent: the goal stands with only its valid waypoint.
+    assert "[4, 2]" in planner.feedback[1] and "above a '#'" in planner.feedback[1]
+    # Retries spent: the goal stands with the valid waypoints before the first bad one (none).
     assert gm.goal.target_ref == "collect:trophy:c6:r1" and step.record.fallback is False
-    assert step.events[-1].payload["waypoints"] == [[6, 1]]
+    assert step.events[-1].payload["waypoints"] == []
+    good_then_bad = [(4, 3), (4, 2)]
+    gm, planner, mem, step = started(config, [plan("collect:trophy:c6:r1", good_then_bad)] * 2)
+    assert step.events[-1].payload["waypoints"] == [[4, 3]]
 
 
 def test_unseen_cells_are_not_waypoints(config):

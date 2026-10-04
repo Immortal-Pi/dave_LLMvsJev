@@ -338,6 +338,19 @@ Checks:
 - checked on level 2 in headless Chrome;
 - a stopped live run replayed in `inspect` with its digests verified.
 
+## Planner: platforms, physics-checked waypoints, feedback (2026-10-04)
+
+Watching level 2 live showed the Azure planner sending Dave through brick pillars and over a brick corner, and re-proposing a route that had just stalled. Changes (`docs/planner.md`):
+- **Platforms:** the request lists the explored level as platforms with their exits and reachability (`control/platforms.py`), and each candidate gets its estimated platform chain (`path`). Walls show up as missing exits.
+- **Waypoints checked with the physics:** each leg must be reachable from the one before, and the goal from the last; the feedback names the exits. Waypoints may be platform ids (`"c8r4"`).
+- **Feedback:** `attempts` (goals tried on this level and how they ended) and `failed_links` (moves that left Dave stuck or killed him; each failure makes the move cost more in the reach estimate).
+- **Reach fix:** jumps from a platform's end (Dave overhanging the edge). Before it, the estimate found no way from the level 2 start area to the trophy; now it finds the real climb (verified with `scripts/try_skills.py`).
+- **Tactical end-tile notes** from Dave's pixel position: 28 of 34 right on the real level 2 route, against 18 before.
+- **Projectiles:** not sent to the planner (a planner call takes seconds, a shot crosses the screen in about 2 s; the per-decision threat screen dodges). The viewer draws each visible threat's predicted path.
+- **Viewer:** the estimated moves (jumps as arcs, unknown legs red), reachable platforms, failed moves, deaths, threat paths; "Path estimate", "Tried this level" and "Failed moves" rows.
+
+Checks: `tests/unit/test_platforms.py` (11); 297 tests pass; mock runs on levels 2 and 3 (18,000 frames, 0 deaths; the mock tactical model chooses at random, so its score says nothing about planning); the `/live` page checked in headless Chrome. Not run: a paid Azure planner run with the new request.
+
 ## Verification (run 2026-10-03)
 
 ```bash
@@ -510,7 +523,8 @@ Live evidence covers **arms A, B and C** (labeled `mode=live`): one smoke episod
 ## Open issues
 
 - **Reach estimates are one column off** (found with the inspector; see above). Candidate notes and waypoints can point to the wrong tile. Fix and re-check against real outcomes (`inspect` writes both) before the next live run.
-- `explore` goals put the waypoint on Dave's row at the level's right edge, even behind a pillar. This drives back-and-forth walking. Planner waypoints over the explored map are meant to fix this, but have not run live yet.
+- `explore` goals put the waypoint on Dave's row at the level's right edge, even behind a pillar. Candidate `path`s now name the nearest reachable platform instead, and planner waypoints are checked with the physics, but neither has run with the live planner yet.
+- Platform paths are estimates: collectibles touched only mid-air (e.g. the level 2 gem at (8,8) over the fire) show "no known path".
 - The threat screen applies to standing and falling Dave, not mid-jump. Monster motion is linear extrapolation. In mock runs the remaining risk is random walks off ledges that the screen keeps because every option is equally risky.
 
 - Asset licensing: deadly-dave's `res/` art and levels come from the original game. Use them locally only; do not commit them here.

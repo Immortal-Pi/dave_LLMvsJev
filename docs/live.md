@@ -25,10 +25,10 @@ It runs one episode at a time, exactly as `play` runs it (`run_trial`): the same
   | Event | When | Holds |
   | --- | --- | --- |
   | `episode` | start, end (`started` / `finished`; `stopped` from the server) | frame, level, tile, state, score, lives |
-  | `plan` | every planning step | triggers, chosen goal, rationale, waypoints, route summary (with incidents), fallback, calls, candidate goals, the explored `map` |
+  | `plan` | every planning step | triggers, chosen goal, rationale, waypoints, route summary (with incidents), fallback, calls, candidate goals (with their `path`), the explored `map`, `platforms`, `tried` (attempts), `failed_links`, the estimated `path` and the level's `deaths` |
   | `goal` | a goal ends | status and reason |
   | `deciding` | a model is asked | the number of options, the screened skills |
-  | `decision` | the choice | every offered skill with its description, `screened` (removed skills and reasons), the chosen id, forced/fallback, Jev's per-skill probabilities, call latency |
+  | `decision` | the choice | every offered skill with its description, `screened` (removed skills and reasons), the chosen id, forced/fallback, Jev's per-skill probabilities, call latency, `threats` (each visible threat's predicted path) |
   | `outcome` | the skill ended | outcome, reason, frames, end tile, events (death, pickup, …) |
 
   The server adds `run` (settings), `notice` (the budget of a paid run), `summary` (the `play` summary), `error` and `idle`.
@@ -62,7 +62,7 @@ It runs one episode at a time, exactly as `play` runs it (`run_trial`): the same
 | --- | --- |
 | `GameView` | the frame, about 20 per second, scaled with `image-rendering: pixelated`; score, lives, deaths; the "choosing" overlay |
 | `DecisionFeed` | newest first: decision cards (options sorted by Jev probability with `ProbabilityBar`, `danger:` notes, removed skills struck through with their reason, the outcome), planner cards (goal, triggers, waypoints, rationale), goal and error notes |
-| `PlannerPanel` + `LevelMap` | the latest plan: the explored map (unseen dimmed, the screen outlined) with Dave now, the planner's path (Dave → waypoints → goal), the waypoint the engine is heading for; goal, reason, triggers, waypoints, the learned route and its past deaths, the candidate goals |
+| `PlannerPanel` + `LevelMap` | the latest plan: the explored map (unseen dimmed, the screen outlined) with Dave now; the estimated moves Dave → waypoints → goal (walks as lines, jumps as arcs, falls as drops, a leg with no known way red and dashed); the planner's waypoints and the one the engine is heading for; reachable platforms (green outline), moves that failed this level (red dashes), deaths (✕) and each visible threat's predicted path (orange dashes, from the latest decision). Beside it: goal, reason, triggers, waypoints, the path estimate, the learned route and its past deaths, what was tried on this level, the failed moves, the candidate goals |
 
 Mock models give no probabilities or waypoints. The rule planner never gives waypoints; the Azure planner does, especially when Dave is stuck.
 

@@ -8,7 +8,7 @@ goes through the same parsing, validation, retry and fallback code in the goal m
 from __future__ import annotations
 
 import json
-from typing import Any, Protocol
+from typing import Annotated, Any, Protocol
 
 from pydantic import Field, ValidationError
 
@@ -27,6 +27,9 @@ class GoalCandidate(Contract):
     success_predicate: str
     constraints: tuple[str, ...] = ()
     route: dict[str, Any] | None = None
+    # Estimated way there over the explored platforms (control/platforms.py), when the adapter
+    # has a reach envelope: "c1r9 -jump right-> c4r7 ...", or why no path is known.
+    path: str | None = None
 
 
 class PlanningRequest(Contract):
@@ -51,6 +54,12 @@ class PlanningRequest(Contract):
     # The explored level map (control/level_map.py): every screen of this level seen so far.
     map: dict[str, Any] | None = None
     waypoints: tuple[tuple[int, int], ...] = ()  # the active goal's planner waypoints still ahead
+    # The explored map as platforms with their exits and reachability (control/platforms.py).
+    platforms: tuple[dict[str, Any], ...] = ()
+    # What was tried on this level this episode and how it ended; moves that kept failing
+    # (control/attempts.py).
+    attempts: tuple[dict[str, Any], ...] = ()
+    failed_links: tuple[dict[str, Any], ...] = ()
 
     @property
     def candidate_ids(self) -> tuple[str, ...]:
@@ -58,14 +67,16 @@ class PlanningRequest(Contract):
 
 
 MAX_WAYPOINTS = 5
+PlatformId = Annotated[str, Field(pattern=r"^c-?\d+r\d+$")]
 
 
 class PlanChoice(Contract):
     goal: str = Field(min_length=1, max_length=128)
     rationale: str = Field(default="", max_length=500)
-    # Optional intermediate standing tiles [col, row] on the way to the goal, in order. The goal
-    # manager checks each against the explored map before the tactical model follows them.
-    waypoints: tuple[tuple[int, int], ...] = Field(default=(), max_length=MAX_WAYPOINTS)
+    # Optional intermediate standing tiles [col, row], or platform ids ("c8r4"), on the way to the
+    # goal, in order. The goal manager checks each leg with the game's physics before the
+    # tactical model follows them.
+    waypoints: tuple[tuple[int, int] | PlatformId, ...] = Field(default=(), max_length=MAX_WAYPOINTS)
 
 
 class PlanOutputError(ValueError):

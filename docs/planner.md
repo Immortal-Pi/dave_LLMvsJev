@@ -86,6 +86,8 @@ Goals are checked after every skill, never per frame. Event payloads carry `goal
 - **Goals:** how the previous goal ended, and the current goal (on soft triggers).
 - **Candidates.**
 - **Map:** the explored level map (`map`) and the planner's waypoints still ahead (`waypoints`). See "Map and waypoints".
+- **Platforms and paths** (adapters with a reach envelope, i.e. Dave): `platforms`, each candidate's `path`. See "Platforms: the map as places to stand".
+- **What was tried:** `attempts` and `failed_links` on this level this episode. See "Feedback: what already failed".
 - **Graph arms only:** each candidate's `route` summary, with the deaths recorded on the route's platforms (`incidents`: cause, tile, skill; the newest 5).
 
 Arms A and B send identical requests (tested on the fixture and on the real game).
@@ -111,11 +113,42 @@ Arms A and B send identical requests (tested on the fixture and on the real game
 - **Drawing:** the tactical legend, with Dave `@`, visible monsters `M` and shots `*` drawn over it. The planner's waypoints still ahead are drawn as `1`–`5`.
 - **The map is identical for every arm.**
 
-**Waypoints.** The planner may add up to 5 intermediate standing tiles `[col, row]`, in order, to its choice. The system prompt asks for them when the path is not a direct walk or single jump, and always on `stuck` or `repeated_failures`, for example "climb the left ledges first, then go right along the top".
-- **Validation:** each waypoint must be an explored empty cell directly above a `#`. Invalid ones are sent back as retry feedback (`invalid_output`). When the retries run out, the goal stands and only its valid waypoints are kept.
+**Waypoints.** The planner may add up to 5 intermediate waypoints to its choice, in order: platform ids (`"c8r4"`, preferred; resolved to the platform's cell nearest the goal) or standing tiles `[col, row]`. The system prompt asks for them when the path is not a direct walk or single jump, and always on `stuck` or `repeated_failures`, for example "climb the left ledges first, then go right along the top".
+- **Validation, with the game's physics:**
+  - each waypoint must be an explored empty cell directly above a `#`;
+  - with a reach envelope, each must be reachable (`ReachMap.path`) from the one before, and the first from Dave's cell;
+  - the goal must be reachable from the last waypoint whenever it is reachable from Dave (checked for item goals, not explore).
+  - A problem is sent back as retry feedback (`invalid_output`) that names it and the options, e.g. `waypoint [16, 5] is not reachable from [10, 4] (a wall, a gap or too high); from c8r4 Dave can reach: c11r6 (fall right), c13r3 (jump right), …`, or `… the goal is reachable this way: c1r9 -jump right-> c4r7 …`.
+  - When the retries run out, the goal stands with the valid waypoints before the first bad one.
 - **Following:** the first waypoint becomes the goal's `next_waypoint`, ahead of the graph route and the reach estimate. When Dave stands on a waypoint's row within 1 column, it and any before it are dropped, and the next one takes over. When none are left, the route or reach waypoint resumes.
 - **Lifetime:** the queue clears when the goal ends (including on death or a level change). The no-progress clock measures distance to the current waypoint, so `stuck` follows the queue.
 - **Record:** `goal_set` records the accepted waypoints, and the inspector replays them.
+
+## Platforms: the map as places to stand
+
+An LLM reads a character grid poorly, especially which column a wall is in (on level 2 the planner sent Dave along row 5 through two brick pillars). So, with a reach envelope, the request also holds the same explored cells as platforms (`control/platforms.py`, identical for every arm):
+
+- **Platform:** a maximal run of standable cells on one row (row 0, above the level's top wall, is left out). Its id is `c<left col>r<row>`, e.g. `c8r4`.
+- **`exits`:** the platforms one move away, from `ReachMap.moves` over each of its cells: `{"to": "c8r4", "by": "jump right", "from_col": 4}`, the cheapest per destination. A wall or a gap is a missing exit. A move that failed this level carries `note: "failed 2x this level"`.
+- **`reachable` / `hops`:** a breadth-first search from Dave's platform.
+- **`items`:** the candidate goals taken from it; **`open`:** an end next to unexplored cells; **`danger`:** `died here this episode 2x (fire)`, and on graph arms `died here in past runs …` from the learned graph's incidents.
+- At most 40 are sent: reachable ones first (fewest hops), then the rest.
+- **Each candidate's `path`:** the estimated chain, e.g. `c1r9 -jump right-> c4r7 -jump left-> c2r5 -jump right-> c4r3 -jump right-> c8r4 -jump right-> c13r8` (the level 2 trophy, the climb over the left ledges), or `no known path over the explored platforms; nearest reachable platform: c16r5`.
+
+**Ledge-end jumps.** On the real game Dave stands overhanging a platform's end while one foot point is over a brick, and a jump from there carries further: on level 2, from x 72 on the one-tile ledge at (4,3) `jump_right` lands at (8,4), but from mid-cell it falls short. `ReachMap.moves` therefore also launches jumps from `edge_x`, the furthest standing pixel, at a platform's true end (no floor in the next cell). Without it, the estimate found no way from the level 2 start area to the trophy.
+
+**Estimated end tiles** on tactical candidates come from Dave's actual pixel position (`estimate_end_at`, the threat screen's `trace_skill`), no longer from his cell: on the real 37-skill level 2 route it is right for 28 of 34 standing starts, against 18 for the cell-based estimate (`move_right_1` at a ledge end stays on the overhang instead of "falling").
+
+## Feedback: what already failed
+
+The planner is stateless between calls. `control/attempts.py` keeps, for the current level of this episode (reset on a level change), identical for every arm:
+
+- **`attempts`:** the last 6 goals: goal, waypoints, `outcome` (`achieved`, `failed`, `expired`, `replaced`, or `active` for the current one), `reason` (`death`, `deadline`, `replanned: stuck`, …), `waypoints_reached` (`1/3`), `furthest` tile and `frames`.
+- **`failed_links`:** (from cell → to cell) moves that failed: the first jump or fall of the estimated path toward the waypoint Dave was heading for, recorded when the planner is called on `stuck` or `repeated_failures`, or when Dave dies of fire, water or an unknown cause on it (a shot or a monster is not the move's fault). `times`, `how`, and `avoid` once it failed twice.
+- **Cost, not a ban:** each failure adds `FAILED_MOVE_COST` (6, about three jumps) to that move in the reach estimate, so the engine's own route and the planner's `path`s go another way when there is one, but still use a move that is the only way (a weak executor fails right moves too: with hard bans, mock runs on level 2 lost the only route to the trophy).
+- **`deaths`:** cause and tile, shown as platform `danger` and on the viewer.
+
+This is per-episode memory, not the learned graph: only graph arms remember across runs, through the graph (route summaries with `incidents`, and `died here in past runs` on platforms).
 
 ## Azure planner (`--planner live`)
 
@@ -123,12 +156,13 @@ Arms A and B send identical requests (tested on the fixture and on the real game
 - **Prompt:** the system prompt states:
   - only the rules verified in `docs/feasibility.md` §3;
   - the planner's role;
-  - how to read the map (standing cells, jump reach, deadly tiles);
-  - when to give waypoints;
+  - how to read `platforms` (exits, reachability; walls are missing exits), candidate `path`s and the map;
+  - that `attempts` and `failed_links` already failed, and must not be repeated;
+  - when to give waypoints (platform ids preferred; each reachable from the one before);
   - the output format.
 
   It asks for a brief rationale, not step-by-step reasoning. The user message is the `PlanningRequest` as JSON.
-- **Output:** `response_format` is a strict `json_schema`: `goal` is an enum of the offered ids, and `waypoints` is an array of integer pairs (empty when not needed). `reasoning_effort: low`, `max_completion_tokens: 2000`.
+- **Output:** `response_format` is a strict `json_schema`: `goal` is an enum of the offered ids, and `waypoints` is an array of platform ids or integer pairs (`anyOf`; empty when not needed). `reasoning_effort: low`, `max_completion_tokens: 2000`.
 - **Transport retries:** timeouts, 408, 429 and 5xx are retried with exponential backoff up to `models.max_retries`. 4xx responses are not retried, and their messages are redacted.
 - **Logging:** usage tokens (prompt, completion, reasoning) are recorded. `cost_usd` stays null, because no price table is assumed. The `request_ref` is a hash of the body, and the `response_ref` is the response id.
 - **Verified 2026-10-03:** `gpt-5.4-mini`, api-version `2024-12-01-preview`. The strict schema and `reasoning_effort` are accepted, and a call takes about 1.3–1.6 s with about 600–1000 prompt tokens. The sanitized response is `tests/fixtures/azure/planner_response.json` (`scripts/probe_azure.py`).
@@ -148,7 +182,7 @@ Arms A and B send identical requests (tested on the fixture and on the real game
 ## Storage
 
 - Planner calls are stored as `model_calls` rows with `purpose=planner`. `EpisodeRecorder.record_planning` writes them together with the goal events, with no `decision_seq` because they are not tied to one skill.
-- The `goal_set` payload records the triggers, candidate ids, choice, rationale, fallback, attempts, waypoint, route summary and timings.
+- The `goal_set` payload records the triggers, candidate ids, choice, rationale, fallback, attempts, waypoint, route summary and timings, plus the estimated `path` (Dave → waypoints → goal as `[col, row, kind]`, kind `walk`/`fall`/`jump`, `unknown` for a leg with no known way) and the level's `deaths`.
 - Replay is unaffected, since it re-executes the recorded skill choices.
 
 ## Known limitations

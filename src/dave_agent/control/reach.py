@@ -27,12 +27,18 @@ TILE = 16
 BLOCKING = frozenset({"solid"})
 DEADLY = frozenset({"hazard"})
 MAX_FLIGHT_TICKS = 400
+FAILED_MOVE_COST = 6.0  # per failure in play: about three extra jumps
 
 
 class ReachMap:
-    def __init__(self, cells: Mapping[Cell, str], cfg: ReachConfig) -> None:
-        """``cells`` maps every observed cell to its tile kind ("empty" when nothing is there)."""
+    def __init__(self, cells: Mapping[Cell, str], cfg: ReachConfig,
+                 failed: Mapping[tuple[Cell, Cell], int] | None = None) -> None:
+        """``cells`` maps every observed cell to its tile kind ("empty" when nothing is there);
+        ``failed`` counts (from, to) moves that failed in play this level: each failure adds
+        ``FAILED_MOVE_COST`` to the move, so routes avoid it when there is another way but still
+        use it when it is the only one (a weak executor can fail a move that is right)."""
         self.cells, self.cfg = cells, cfg
+        self.failed = dict(failed or {})
         self.max_row = max((r for _, r in cells), default=0)
         self._moves: dict[Cell, list[tuple[Cell, str, float]]] = {}
 
@@ -167,8 +173,20 @@ class ReachMap:
             path.append((x, y))
         return path
 
+    def edge_x(self, cell: Cell, direction: int) -> int:
+        """Dave's furthest pixel x toward ``direction`` while still standing on ``cell``'s ground:
+        the game supports him while either foot point is over a brick, so at a platform's end he
+        stands overhanging it, and a jump from there carries further than one from mid-cell."""
+        x, y = cell[0] * TILE, cell[1] * TILE
+        while abs(x - cell[0] * TILE) < TILE and not self._blocked(x + direction, y) \
+                and self._ground(x + direction, y) == cell:
+            x += direction
+        return x
+
     def moves(self, cell: Cell) -> list[tuple[Cell, str, float]]:
-        """(landing cell, kind, cost) for every estimated move from a standable cell."""
+        """(landing cell, kind, cost) for every estimated move from a standable cell. Jumps are
+        launched from the cell and from either end of it (``edge_x``). Moves that failed in play
+        cost more (``failed``)."""
         if cell in self._moves:
             return self._moves[cell]
         out: dict[Cell, tuple[str, float]] = {}
@@ -185,13 +203,20 @@ class ReachMap:
                 r += 1
             if self.standable((col + d, r)):
                 out.setdefault((col + d, r), ("fall", 1.0 + 0.1 * (r - row)))
-        for d, hold in ((0, 0), (-1, self.cfg.short_hold_ticks), (1, self.cfg.short_hold_ticks), (-1, None), (1, None)):
-            land = self.fly(cell, d, hold)
-            if land is not None and land != cell and self.standable(land):
-                cost = 2.0 + 0.1 * abs(land[0] - col)
-                if land not in out or out[land][1] > cost:
-                    out[land] = ("jump", cost)
-        self._moves[cell] = sorted((c, k, w) for c, (k, w) in out.items())
+        shapes = ((0, 0), (-1, self.cfg.short_hold_ticks), (1, self.cfg.short_hold_ticks), (-1, None), (1, None))
+        # Edge launches only at a platform's end (no floor in the next cell): walking stops Dave
+        # there overhanging the edge (real game, level 2: x 72 on the ledge at (4,3)).
+        launches = [(col * TILE, 0.0)] + [(self.edge_x(cell, d), 0.3) for d in (-1, 1)
+                                          if self.passable((col + d, row)) and not self.standable((col + d, row))]
+        for x, extra in launches:
+            for d, hold in shapes:
+                land = self.trace(x, row * TILE, d, hold)[1]
+                if land is not None and land != cell and self.standable(land):
+                    cost = 2.0 + extra + 0.1 * abs(land[0] - col)
+                    if land not in out or out[land][1] > cost:
+                        out[land] = ("jump", cost)
+        self._moves[cell] = sorted((c, k, w + FAILED_MOVE_COST * self.failed.get((cell, c), 0))
+                                   for c, (k, w) in out.items())
         return self._moves[cell]
 
     # -- search ------------------------------------------------------------------------------
@@ -307,6 +332,17 @@ def trace_skill(reach: ReachMap, x: int, y: int, spec: SkillSpec, facing: int = 
         # now faces, until he lands. A walk off a ledge is judged by where that fall ends.
         path += reach.walk(*path[-1], 0, MAX_FLIGHT_TICKS, direction or facing)
     return path
+
+
+def estimate_end_at(reach: ReachMap, x: int, y: int, spec: SkillSpec, facing: int = 0) -> Cell | None:
+    """Estimated standing cell after running ``spec`` from Dave's actual pixel position
+    (``trace_skill``): where he stands inside his cell matters at a ledge's end (from x 72 on the
+    level 2 ledge at (4,3) jump_right reaches (8,4); from x 56 it falls short). None when the
+    path touches a hazard cell or does not end standing."""
+    path = trace_skill(reach, x, y, spec, facing)
+    if any(reach._deadly(px, py) for px, py in path):
+        return None
+    return reach._ground(*path[-1])
 
 
 def iter_jumps(reach: ReachMap, cell: Cell) -> Iterable[tuple[str, Cell | None]]:
