@@ -20,6 +20,7 @@ from dave_agent.config import AppConfig, ArmConfig, ConfigError
 from dave_agent.control.goals import GoalManager
 from dave_agent.memory.episodes import EpisodeRecorder, EpisodeStore
 from dave_agent.memory.graph import GraphStore
+from dave_agent.memory.persistence import load_store, store_dir, store_exists
 from dave_agent.memory.working import WorkingMemory
 from dave_agent.models.azure import AzureChatClient, AzurePlanner, AzureSettings, AzureTacticalModel
 from dave_agent.models.jev import JevClient, JevSettings, JevTacticalModel
@@ -117,10 +118,27 @@ def budget_notice(config: AppConfig, mode: str) -> dict:
         "max_episode_wall_seconds": config.benchmark.max_episode_wall_seconds}}
 
 
+def open_graph(config: AppConfig, arm_name: str, adapter: GameAdapter, adapter_name: str,
+               path: Path | None = None) -> tuple[GraphStore | None, Path | None, bool]:
+    """(store, store directory, learn) for ``play`` and ``live``: a graph arm loads or creates its
+    own store (``path``, else ``memory.graph_checkpoint``, else ``graphs/arm-<ARM>/<adapter>``
+    next to the episode store; a legacy ``X.json`` is split by level), so no route knowledge
+    leaks between arms. Other arms get (None, None, False)."""
+    if not config.arms[arm_name].graph_enabled:
+        return None, None, False
+    path = (path or config.memory.graph_checkpoint
+            or config.memory.episode_store.parent / "graphs" / f"arm-{arm_name}" / f"{adapter_name}.json")
+    caps = adapter.capabilities()
+    policy = config.environment.observation_policy
+    graph = (load_store(path, caps.adapter, caps.build_id, policy) if store_exists(path)
+             else GraphStore(caps.adapter, caps.build_id, policy, config.graph.evidence_per_item))
+    return graph, store_dir(path), config.memory.graph_updates
+
+
 def run_trial(config: AppConfig, arm_name: str, models: Models, adapter: GameAdapter, adapter_name: str,
               scenario: str, seed: int, store: EpisodeStore, run_id: str, command: str,
               graph: GraphStore | None, learn: bool, reach_hints: bool = True,
-              extra_config: dict | None = None) -> tuple[EpisodeResult, EpisodeRecorder]:
+              extra_config: dict | None = None, on_event=None) -> tuple[EpisodeResult, EpisodeRecorder]:
     """One logged episode. ``graph`` is read by the goal manager on graph-enabled arms; it is
     updated only when ``learn`` is true (a frozen warm checkpoint is read but never written).
     ``reach_hints`` off removes the reachability waypoints and estimated end tiles (an ablation;
@@ -152,6 +170,7 @@ def run_trial(config: AppConfig, arm_name: str, models: Models, adapter: GameAda
             goals=goals,
             max_wall_seconds=config.benchmark.max_episode_wall_seconds,
             evidence=use_graph,  # "past runs" notes, also from a frozen warm checkpoint
+            on_event=on_event,  # the live viewer (runner/live.py); write-only
         )
     except BaseException as exc:
         exc.episode_recorder = recorder  # callers of an interrupted run still know its episode key

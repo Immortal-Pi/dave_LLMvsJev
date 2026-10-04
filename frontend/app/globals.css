@@ -526,3 +526,283 @@ input {
 .wrap {
   overflow-wrap: anywhere;
 }
+
+/* -- live viewer (/live) ------------------------------------------------------------------ */
+main:has(.live) {
+  max-width: 1800px;
+}
+.live {
+  display: grid;
+  gap: 16px;
+}
+.live-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem 1rem;
+  align-items: end;
+}
+.live-controls label {
+  display: grid;
+  gap: 0.2rem;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+.live-controls select,
+.live-controls button {
+  font: inherit;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0.35rem 0.6rem;
+  min-height: 34px;
+}
+.live-controls button {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+  font-weight: 600;
+  padding: 0.35rem 1.2rem;
+  cursor: pointer;
+}
+.live-controls button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.live-controls button.stop {
+  background: var(--danger);
+  border-color: var(--danger);
+}
+.status-line {
+  align-self: center;
+}
+.error-line {
+  flex-basis: 100%;
+  margin: 0;
+  color: var(--danger);
+}
+
+.live-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+  grid-template-areas:
+    "game feed"
+    "planner planner";
+  gap: 16px;
+}
+.game-view {
+  grid-area: game;
+}
+.feed {
+  grid-area: feed;
+  max-height: 690px;
+  overflow-y: auto;
+  display: grid;
+  align-content: start;
+  gap: 0.5rem;
+}
+.planner {
+  grid-area: planner;
+}
+@media (max-width: 1000px) {
+  .live-grid {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas: "game" "feed" "planner";
+  }
+  .feed {
+    max-height: 480px;
+  }
+}
+
+.screen {
+  position: relative;
+  background: #000;
+  border-radius: 6px;
+  overflow: hidden;
+  aspect-ratio: 320 / 200;
+}
+.screen img {
+  display: block;
+  width: 100%;
+  height: auto;
+  image-rendering: pixelated;
+}
+.screen-empty {
+  display: grid;
+  place-items: center;
+  height: 100%;
+  color: #aaa;
+}
+.thinking {
+  position: absolute;
+  left: 12px;
+  bottom: 12px;
+  padding: 0.3rem 0.7rem;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.72);
+  color: #fff;
+  font-size: 0.9rem;
+}
+.thinking .muted {
+  color: #bbb;
+}
+.thinking.done {
+  bottom: auto;
+  top: 12px;
+}
+
+.card {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0.5rem 0.7rem;
+  background: var(--panel);
+}
+.card header {
+  margin-bottom: 0.2rem;
+}
+.plan-card {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.plan-card blockquote {
+  margin: 0.3rem 0 0;
+}
+.note.info {
+  color: var(--accent);
+}
+.note.warn {
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+.note.ok {
+  color: var(--ok);
+}
+.note.danger {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+.options {
+  list-style: none;
+  margin: 0.3rem 0;
+  padding: 0;
+  display: grid;
+  gap: 2px;
+}
+.options li {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  padding: 1px 4px;
+  border-radius: 4px;
+}
+.options li.chosen {
+  background: var(--accent-soft);
+}
+.options li.screened .skill {
+  text-decoration: line-through;
+  color: var(--muted);
+}
+.options .skill {
+  min-width: 9.5rem;
+}
+.out.ok {
+  color: var(--ok);
+}
+.out.bad {
+  color: var(--danger);
+  font-weight: 600;
+}
+
+.planner-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 3fr) minmax(260px, 1fr);
+  gap: 16px;
+}
+@media (max-width: 1000px) {
+  .planner-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+.map-wrap {
+  overflow-x: auto;
+}
+.level-map {
+  /* 24 px per cell at most; a long level scrolls sideways instead of shrinking past legibility */
+  max-width: none;
+  height: auto;
+  display: block;
+}
+.level-map .axis {
+  font: 8px var(--mono);
+  fill: var(--muted);
+}
+.cell-unseen {
+  fill: var(--line);
+  opacity: 0.45;
+}
+.level-map .screen-box {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 1.5;
+  stroke-dasharray: 4 3;
+}
+.level-map .plan-path {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 2.5;
+  stroke-linejoin: round;
+  opacity: 0.85;
+}
+.level-map .waypoint circle {
+  fill: var(--accent);
+}
+.level-map .waypoint text {
+  font: bold 8px var(--mono);
+  fill: #fff;
+}
+.level-map .goal-box {
+  fill: none;
+  stroke: var(--ok);
+  stroke-width: 2.5;
+}
+.level-map .heading {
+  fill: none;
+  stroke: var(--warn);
+  stroke-width: 2;
+}
+.level-map .dave-dot {
+  fill: var(--danger);
+  stroke: #fff;
+  stroke-width: 1.5;
+}
+.legend-line .key {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  margin: 0 0.25rem 0 0.6rem;
+  vertical-align: middle;
+  border-radius: 2px;
+}
+.key.dave {
+  background: var(--danger);
+  border-radius: 50%;
+}
+.key.path {
+  background: var(--accent);
+  height: 3px;
+}
+.key.wp {
+  background: var(--accent);
+  border-radius: 50%;
+}
+.key.goal {
+  border: 2px solid var(--ok);
+}
+.key.heading {
+  border: 2px solid var(--warn);
+  border-radius: 50%;
+}
+.key.screen {
+  border: 1.5px dashed var(--accent);
+}

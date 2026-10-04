@@ -21,6 +21,7 @@ Detailed documentation lives in `docs/`. Read the relevant file before working i
 - [docs/planner.md](docs/planner.md): the strategic planner and goal manager (candidate goals, goal lifecycle, shared triggers, fallback, the Azure planner, graph route waypoints).
 - [docs/benchmark.md](docs/benchmark.md): the benchmark protocol (paired trials, arm order, cold and warm memory regimes, the manifest, per-episode records, metrics and summaries, the paid-run ceiling and Azure price table, Dave settings).
 - [docs/inspector.md](docs/inspector.md): the decision inspector (`dave-agent inspect`: exact replay checked against the recorded request digests, per-decision bundles with the exact Jev and LLM requests, real outcomes of every option, screenshots, opt-in `--ask`) and the local read-only viewer in `frontend/` (Next.js).
+- [docs/live.md](docs/live.md): the live viewer (`dave-agent live` streams a running episode; `frontend/` `/live` shows the game, every Jev/LLM decision and the planner's map and waypoints as they happen).
 - [docs/tactical.md](docs/tactical.md): tactical controllers (the shared request, output validation, retry, deterministic fallback, per-episode budgets, context digests, the Azure and Jev tactical models).
 - [docs/state_mapping.md](docs/state_mapping.md): deadly-dave C fields mapped to `Observation` fields.
 - [docs/jev-apis.md](docs/jev-apis.md): the OpenRouter chat SDK and the decisions endpoint, including models, payload shape, question types, and config.

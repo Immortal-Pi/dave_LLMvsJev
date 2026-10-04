@@ -320,6 +320,24 @@ The inspector verified 392 request digests on a replay.
 
 **Replay note:** the screen changes what the tactical models see, so runs recorded before it no longer match their digests in `inspect`.
 
+## Live viewer (2026-10-04)
+
+`dave-agent live` and the `/live` page in `frontend/` (`docs/live.md`) let you choose a level and arm in the browser, then watch:
+- the real game (bridge frames, about 20 per second);
+- every tactical decision as it is made: Jev's probabilities, the skills the threat screen removed and why, and the outcome;
+- the planner's explored map, goal, waypoints and reasons.
+
+How it works:
+- **Recorded like `play`:** a live run goes through `run_trial`, so it is recorded like `play` and can be inspected.
+- **Write-only hook:** the stream comes from the new `on_event` hook in `run_episode`, which changes no decision.
+- **Paid runs** need `--allow-paid`.
+- **Setup shared with `play`:** graph setup moved to `session.open_graph`, used by both `play` and `live`.
+
+Checks:
+- tests: `test_live.py` (6);
+- checked on level 2 in headless Chrome;
+- a stopped live run replayed in `inspect` with its digests verified.
+
 ## Verification (run 2026-10-03)
 
 ```bash

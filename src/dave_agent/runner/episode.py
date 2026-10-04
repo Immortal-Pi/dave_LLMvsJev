@@ -15,6 +15,9 @@ Budgets: the simulation-frame budget (``max_frames``) and the wall-time budget
 ``BudgetExhausted`` when a call/token/cost budget runs out with ``on_budget_exhausted:
 terminate``. Each ends the episode as ``truncated`` with the budget in the termination reason. Ctrl-C ends the episode as ``truncated`` / ``interrupted``,
 writes what was recorded so far, and re-raises.
+The optional ``on_event`` callback receives a JSON-ready summary of each step as it happens
+(``episode``, ``plan``, ``goal``, ``deciding``, ``decision``, ``outcome``) for the live viewer
+(runner/live.py). It is write-only: nothing it does feeds back into decisions.
 """
 
 from __future__ import annotations
@@ -22,7 +25,9 @@ from __future__ import annotations
 import copy
 import logging
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
+from typing import Any
 
 from dave_agent.adapters.base import GameAdapter
 from dave_agent.config import ExecutorConfig, SkillSpec
@@ -91,8 +96,17 @@ def run_episode(
     goals: GoalManager | None = None,
     max_wall_seconds: float | None = None,
     evidence: GraphStore | None = None,
+    on_event: Callable[[str, dict[str, Any]], None] | None = None,
 ) -> EpisodeResult:
     started = time.monotonic()
+
+    def emit(kind: str, payload: dict[str, Any]) -> None:
+        if on_event is not None:
+            try:
+                on_event(kind, payload)
+            except Exception:  # a viewer problem never stops the episode
+                log.exception("on_event(%s) failed", kind)
+
     # ``evidence``: the graph-enabled arm's graph (learning or frozen). Its "past runs" notes come
     # from a copy taken before this episode, so they never count this episode's attempts (those
     # are in the working-memory notes).
@@ -119,6 +133,7 @@ def run_episode(
     result.observation_ids.append(observation.observation_id)
     if recorder is not None:
         recorder.start(observation, start_events)
+    emit("episode", {"status": "started", "scenario_id": scenario_id, "seed": seed, **_obs_view(observation)})
 
     def planned(step: PlanningStep) -> None:
         result.model_calls.extend(step.calls)
@@ -127,6 +142,11 @@ def run_episode(
             result.planning.append(step.record)
         if recorder is not None and (step.calls or step.events):
             recorder.record_planning(step.calls, step.events)
+        for e in step.events:
+            if e.event_type in ("goal_achieved", "goal_failed"):
+                emit("goal", {"frame": e.frame, **e.payload})
+        if step.record is not None:
+            emit("plan", _plan_view(step))
 
     stop: tuple[str, dict] | None = None  # (termination reason, truncation payload) for budget stops
     try:
@@ -147,6 +167,7 @@ def run_episode(
             candidates = list(offered.candidates)
             calls: tuple[ModelCallRecord, ...] = ()
             events: list[Event] = []
+            screened: dict[str, str] = {}
             if len(candidates) == 1:
                 # Only one legal action (e.g. waiting out a burn): no model call, same for every arm.
                 decision = Decision(
@@ -168,6 +189,7 @@ def run_episode(
                                             frame=observation.frame, certainty="derived",
                                             payload={"masked": screened,
                                                      "kept": [c.candidate_id for c in candidates]}))
+                emit("deciding", {"frame": observation.frame, "options": len(candidates), "screened": screened})
                 try:
                     decision, calls = controller.decide(observation, memory.goal, candidates, memory.context())
                 except BudgetExhausted as exc:
@@ -191,6 +213,7 @@ def run_episode(
                                                  "candidate_id": decision.candidate_id, "calls": len(calls)}))
             candidate = validate_decision(decision, candidates, observation)
             result.decisions.append(decision)
+            emit("decision", _decision_view(observation, memory, candidates, screened, decision, calls))
             run = execute(adapter, candidate, skills, observation, executor)
             if run.outcome == "rejected":
                 # Candidates were generated from this observation, so this indicates a bug.
@@ -206,6 +229,7 @@ def run_episode(
                 ref = f"{recorder.episode_key if recorder else observation.episode_id}#{observation.observation_id}"
                 graph.record_execution(observation, run, ref)
             result.executions.append(run)
+            emit("outcome", _outcome_view(run, events))
             tile = None if observation.player_position is None else player_tile(observation.player_position)
             result.execution_starts.append(None if tile is None else (tile.col, tile.row))
             result.events.extend(events)
@@ -249,6 +273,9 @@ def run_episode(
     result.wall_seconds = time.monotonic() - started
     if recorder is not None:
         recorder.finish(result.outcome, result.termination_reason, observation, end_events)
+    emit("episode", {"status": "finished", "outcome": result.outcome,
+                     "termination_reason": result.termination_reason,
+                     "deaths": sum(e.event_type == "death" for e in result.events), **_obs_view(observation)})
     return result
 
 
@@ -256,3 +283,61 @@ def _failure_events(calls, observation) -> list[Event]:
     return [Event(event_type="model_failure", episode_id=observation.episode_id, frame=observation.frame,
                   payload={"provider": c.provider, "model": c.model, "purpose": c.purpose, "status": c.status})
             for c in calls if c.status != "ok"]
+
+
+# -- live viewer summaries (on_event) ------------------------------------------------------------
+def _tile(pos) -> list[int] | None:
+    if pos is None:
+        return None
+    t = player_tile(pos)
+    return [t.col, t.row]
+
+
+def _obs_view(obs) -> dict[str, Any]:
+    return {"frame": obs.frame, "level_id": obs.level_id, "tile": _tile(obs.player_position),
+            "state": obs.player_state, "score": obs.score, "lives": obs.lives, "inventory": obs.inventory}
+
+
+def _call_view(call: ModelCallRecord) -> dict[str, Any]:
+    return {"provider": call.provider, "model": call.model, "status": call.status, "latency_ms": call.latency_ms,
+            "cost_usd": call.cost_usd}
+
+
+def _plan_view(step: PlanningStep) -> dict[str, Any]:
+    r = step.record
+    assert r is not None
+    goal = next((e.payload for e in step.events if e.event_type == "goal_set"), {})
+    return {"frame": r.frame, "triggers": list(r.triggers), "chosen": r.chosen, "goal_id": r.goal_id,
+            "rationale": goal.get("rationale"), "waypoint": goal.get("waypoint"),
+            "waypoints": goal.get("waypoints") or [], "route": r.route, "fallback": r.fallback,
+            "fallback_reason": r.fallback_reason, "attempts": r.attempts, "errors": r.errors,
+            "model_ms": r.model_ms, "calls": [_call_view(c) for c in step.calls],
+            "candidates": [{"id": c.candidate_id, "description": c.description, "route": c.route}
+                           for c in r.request.candidates],
+            "map": r.request.map}
+
+
+def _decision_view(obs, memory: WorkingMemory, candidates, screened: dict[str, str], decision,
+                   calls) -> dict[str, Any]:
+    tactical = [c for c in calls if c.purpose == "tactical"]
+    probabilities = next((c.output.get("probabilities") for c in reversed(tactical)
+                          if c.output and c.output.get("probabilities")), None)
+    goal = memory.goal
+    return {**_obs_view(obs), "observation_id": obs.observation_id,
+            "goal": None if goal is None else {
+                "target": goal.target_ref, "type": goal.goal_type,
+                "waypoint": None if goal.next_waypoint is None else [goal.next_waypoint.col,
+                                                                     goal.next_waypoint.row]},
+            "candidates": [{"id": c.candidate_id, "skill": c.skill, "description": c.description}
+                           for c in candidates],
+            "screened": screened, "chosen": decision.candidate_id, "forced": decision.forced,
+            "fallback": decision.fallback, "fallback_reason": decision.fallback_reason,
+            "probabilities": probabilities, "calls": [_call_view(c) for c in tactical]}
+
+
+def _outcome_view(run: ExecutionResult, events: list[Event]) -> dict[str, Any]:
+    end = run.observation
+    return {**_obs_view(end), "candidate_id": run.candidate_id, "skill": run.skill, "outcome": run.outcome,
+            "reason": run.reason, "frames": run.frames,
+            "events": [e.event_type for e in events if e.event_type in (
+                "death", "item_collected", "respawn", "level_complete", "game_over", "inventory_changed")]}

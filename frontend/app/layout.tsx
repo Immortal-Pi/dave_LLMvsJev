@@ -18,7 +18,9 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
           <Link href="/" className="brand">
             Dave Inspector
           </Link>
-          <span className="muted">local, read-only view of `dave-agent inspect` bundles</span>
+          <Link href="/">Inspected runs</Link>
+          <Link href="/live">Live</Link>
+          <span className="muted">local view of `dave-agent inspect` bundles and `dave-agent live` runs</span>
         </header>
         <main>{children}</main>
       </body>

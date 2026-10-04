@@ -34,14 +34,21 @@ from dave_agent.control.goals import TargetMemory, goal_candidates
 from dave_agent.control.skills import generate_candidates
 from dave_agent.logging_setup import configure_logging
 from dave_agent.memory.episodes import EpisodeStore, StoreError
-from dave_agent.memory.graph import GraphStore
-from dave_agent.memory.persistence import GraphCheckpointError, export_store_yaml, load_store, save_store, store_dir, \
-    store_exists
+from dave_agent.memory.persistence import GraphCheckpointError, export_store_yaml, load_store, save_store, store_dir
 from dave_agent.memory.routes import find_route
 from dave_agent.memory.working import WorkingMemory
 from dave_agent.models.planner import PlanningRequest, parse_plan
 from dave_agent.models.tactical import tactical_request
-from dave_agent.runner.session import azure_planner, azure_tactical, budget_notice, build_models, episode_summary,     jev_tactical, run_trial
+from dave_agent.runner.session import (
+    azure_planner,
+    azure_tactical,
+    budget_notice,
+    build_models,
+    episode_summary,
+    jev_tactical,
+    open_graph,
+    run_trial,
+)
 from dave_agent.runner.benchmark import BenchmarkRunner, BenchmarkSpec, resummarize, train_memory
 from dave_agent.runner.inspect import InspectError, inspect_run, parse_selection
 from dave_agent.runner.replay import load_jsonl, replay_episode
@@ -81,7 +88,6 @@ def _cmd_play(args: argparse.Namespace) -> int:
         raise ConfigError("--mock selects the mock tactical controller; drop it to use --tactical live")
     # Validate credentials before starting the game or spending anything.
     models = build_models(config, args.arm, live_planner, live_tactical, args.seed)
-    arm = config.arms[args.arm]
     if models.mode != "mock":
         print(json.dumps(budget_notice(config, models.mode)), file=sys.stderr)
     adapter_name = args.adapter or config.environment.adapter
@@ -91,17 +97,7 @@ def _cmd_play(args: argparse.Namespace) -> int:
     store = EpisodeStore(args.store or config.memory.episode_store)
     graph, graph_path, learn = None, None, False
     try:
-        if arm.graph_enabled:
-            # Separate store per arm (and per adapter): no route knowledge leaks between arms. A store
-            # is a directory with one checkpoint per level (a legacy X.json is split on load).
-            graph_path = (args.graph or config.memory.graph_checkpoint
-                          or config.memory.episode_store.parent / "graphs" / f"arm-{args.arm}" / f"{adapter_name}.json")
-            caps = adapter.capabilities()
-            policy = config.environment.observation_policy
-            graph = (load_store(graph_path, caps.adapter, caps.build_id, policy) if store_exists(graph_path)
-                     else GraphStore(caps.adapter, caps.build_id, policy, config.graph.evidence_per_item))
-            graph_path = store_dir(graph_path)
-        learn = graph is not None and config.memory.graph_updates
+        graph, graph_path, learn = open_graph(config, args.arm, adapter, adapter_name, args.graph)
         result, recorder = run_trial(config, args.arm, models, adapter, adapter_name, scenario, args.seed, store,
                                      run_id, "play", graph, learn)
     except KeyboardInterrupt as exc:
@@ -274,6 +270,25 @@ def _cmd_train_memory(args: argparse.Namespace) -> int:
     report = train_memory(config, args.arm, args.episodes, scenarios, adapter, args.out, store,
                           args.planner == "live", args.tactical == "live", notify=_notify)
     print(json.dumps(report, indent=2))
+    return 0
+
+
+def _cmd_live(args: argparse.Namespace) -> int:
+    from dave_agent.runner.live import LiveServer, serve
+
+    config = load_config(args.config)
+    server = LiveServer(config, args.adapter, args.store, args.allow_paid,
+                        args.tick_ms, args.frame_every)
+
+    def ready(address) -> None:
+        _notify({"live": f"http://{address[0]}:{address[1]}", "store": str(server.store_path),
+                 "allow_paid": args.allow_paid,
+                 "viewer": "cd frontend && npm run dev, then open http://localhost:3000/live"})
+
+    try:
+        serve(server, args.host, args.port, ready)
+    except KeyboardInterrupt:
+        return 130
     return 0
 
 
@@ -464,6 +479,21 @@ def build_parser() -> argparse.ArgumentParser:
                          help="PAID: send the rebuilt request to this live model (repeatable; needs --decisions)")
     inspect.add_argument("--out", type=Path, help="bundle directory (default: artifacts/inspect/<run-id>)")
     inspect.set_defaults(func=_cmd_inspect)
+
+    live = sub.add_parser("live", help="serve the live viewer: choose a level in the browser and watch the game "
+                                       "and every decision as it happens (frontend/ /live)")
+    live.add_argument("--config", type=Path, default=Path("configs/watch.yaml"),
+                      help="config (default configs/watch.yaml: whole-level frame budget)")
+    live.add_argument("--adapter", choices=["fixture", "dave"], default="dave")
+    live.add_argument("--store", type=Path, help="episode store (default: live.sqlite next to memory.episode_store)")
+    live.add_argument("--host", default="127.0.0.1")
+    live.add_argument("--port", type=int, default=8765)
+    live.add_argument("--allow-paid", action="store_true",
+                      help="PAID: let the viewer start runs with the live Azure planner / Azure or Jev tactical")
+    live.add_argument("--tick-ms", type=float, default=14.0,
+                      help="wall time per game tick (14 = the game's own speed; 0 = as fast as possible)")
+    live.add_argument("--frame-every", type=int, default=3, help="publish a game frame every N ticks")
+    live.set_defaults(func=_cmd_live)
     return parser
 
 
