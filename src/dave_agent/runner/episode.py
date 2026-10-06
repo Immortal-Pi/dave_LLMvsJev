@@ -16,7 +16,8 @@ Budgets: the simulation-frame budget (``max_frames``) and the wall-time budget
 terminate``. Each ends the episode as ``truncated`` with the budget in the termination reason. Ctrl-C ends the episode as ``truncated`` / ``interrupted``,
 writes what was recorded so far, and re-raises.
 The optional ``on_event`` callback receives a JSON-ready summary of each step as it happens
-(``episode``, ``plan``, ``goal``, ``deciding``, ``decision``, ``outcome``) for the live viewer
+(``episode``, ``plan``, ``goal``, ``deciding``, ``decision``, ``outcome``, and ``graph`` on
+graph-enabled arms) for the live viewer
 (runner/live.py). It is write-only: nothing it does feeds back into decisions.
 """
 
@@ -34,10 +35,10 @@ from dave_agent.config import ExecutorConfig, SkillSpec
 from dave_agent.control.experience import annotate_experience
 from dave_agent.control.goals import GoalManager, PlanningRecord, PlanningStep
 from dave_agent.control.skills import ExecutionResult, execute, generate_candidates
-from dave_agent.control.threats import positions, threats
+from dave_agent.control.threats import forecast
 from dave_agent.memory.detector import EventDetector
 from dave_agent.memory.episodes import EpisodeRecorder
-from dave_agent.memory.graph import GraphStore
+from dave_agent.memory.graph import GraphStore, edge_key, inventory_context
 from dave_agent.memory.working import WorkingMemory, player_tile
 from dave_agent.models.base import TacticalController
 from dave_agent.models.tactical import BudgetExhausted
@@ -137,6 +138,9 @@ def run_episode(
     emit("episode", {"status": "started", "scenario_id": scenario_id, "seed": seed, **_obs_view(observation)})
 
     def planned(step: PlanningStep) -> None:
+        if graph is not None:
+            for goal in step.credit:  # what each ended goal's moves did toward it (control/credit.py)
+                graph.record_credit(goal)
         result.model_calls.extend(step.calls)
         result.events.extend(step.events)
         if step.record is not None:
@@ -153,6 +157,9 @@ def run_episode(
     try:
         if goals is not None:
             planned(goals.reset(observation, memory))
+        shown = graph if graph is not None else past  # the graph the viewer draws (learning or frozen)
+        if shown is not None and on_event is not None:
+            emit("graph", _graph_view(shown, observation.level_id, graph is not None))
         while observation.terminal == "running" and observation.frame < max_frames:
             if max_wall_seconds is not None and time.monotonic() - started >= max_wall_seconds:
                 stop = (f"budget:wall_time:{max_wall_seconds:g}s", {"budget": "wall_time",
@@ -176,9 +183,11 @@ def run_episode(
                 )
             else:
                 if observation.player_position is not None:
+                    target = memory.goal.target_ref if memory.goal is not None else None
                     candidates = annotate_experience(
                         candidates, memory.experience(player_tile(observation.player_position)),
-                        None if past is None else past.skill_evidence(observation))
+                        None if past is None else past.skill_evidence(observation),
+                        None if past is None or target is None else past.credit_evidence(observation, target))
                 if goals is not None:
                     # Estimated end tiles and predicted threat contacts in the descriptions; candidates
                     # predicted to touch a threat are masked (control/threats.py). The offered set and
@@ -226,11 +235,16 @@ def run_episode(
                     graph.observe(step.observation)
                 if goals is not None:
                     goals.observe(step.observation)
+            recorded = None
             if graph is not None:
                 ref = f"{recorder.episode_key if recorder else observation.episode_id}#{observation.observation_id}"
-                graph.record_execution(observation, run, ref)
+                recorded = graph.record_execution(observation, run, ref,
+                                                  None if goals is None else goals.predicted_safe(run.candidate_id))
             result.executions.append(run)
             emit("outcome", _outcome_view(run, events))
+            if graph is not None and on_event is not None:
+                emit("graph", {**_graph_view(graph, observation.level_id, True),
+                               "last": _graph_last(graph, observation, run, recorded)})
             tile = None if observation.player_position is None else player_tile(observation.player_position)
             result.execution_starts.append(None if tile is None else (tile.col, tile.row))
             result.events.extend(events)
@@ -300,8 +314,35 @@ def _obs_view(obs) -> dict[str, Any]:
 
 
 def _call_view(call: ModelCallRecord) -> dict[str, Any]:
+    """One model call for the viewer; input and output tokens under one name for Azure
+    (prompt/completion, reasoning included in completion) and Jev (input/output)."""
+    usage = call.usage or {}
     return {"provider": call.provider, "model": call.model, "status": call.status, "latency_ms": call.latency_ms,
-            "cost_usd": call.cost_usd}
+            "cost_usd": call.cost_usd, "tokens": usage.get("total_tokens"),
+            "input_tokens": usage.get("prompt_tokens", usage.get("input_tokens")),
+            "output_tokens": usage.get("completion_tokens", usage.get("output_tokens"))}
+
+
+def _graph_view(store: GraphStore, level_id: str, learning: bool) -> dict[str, Any]:
+    level = store.get(level_id)
+    return {"source": "learning" if learning else "frozen", "level_id": level_id,
+            "graph": None if level is None else level.view()}
+
+
+def _graph_last(store: GraphStore, start, run: ExecutionResult, recorded: str | None) -> dict[str, Any]:
+    """What the skill just added to the graph, and the edge it touched (None when there is none)."""
+    edge = None
+    level = store.get(start.level_id)
+    if level is not None and recorded in ("success", "failure_edge"):
+        source = level.locate(start)
+        key = edge_key(run.skill, inventory_context(start))
+        if recorded == "success":
+            target = level.locate(run.observation)
+        else:
+            target = next((v for _, v, k in level.g.out_edges(source, keys=True) if k == key), None)
+        if source is not None and target is not None:
+            edge = [source, target, key]
+    return {"recorded": recorded, "skill": run.skill, "edge": edge}
 
 
 def _plan_view(step: PlanningStep) -> dict[str, Any]:
@@ -325,19 +366,17 @@ THREAT_VIEW_STEP = 4
 
 
 def _threat_view(obs) -> list[dict[str, Any]]:
-    """Each visible threat's predicted path (centres in tile units, every few ticks) as the
-    threat screen predicts it (control/threats.py); for the viewer only."""
-    cells = {(t.pos.col, t.pos.row): t.kind for t in obs.tiles}
+    """Each visible threat's predicted path with Dave standing still (centres in tile units, every
+    few ticks), as the threat screen predicts it (control/threats.py ``forecast``): monsters on
+    their route, flying plasma, and each shot still to be fired with the tick it is fired
+    (``spawn``). For the viewer only."""
     out = []
-    for t in threats(obs):
-        w, h = (20, 3) if t.entity_type == "plasma" else (24, 21)
-        pts = [[round((t.x + w / 2) / 16, 2), round((t.y + h / 2) / 16, 2)]]
-        for i, pos in enumerate(positions(t, THREAT_VIEW_TICKS, cells), 1):
-            if pos is None:
-                break
-            if i % THREAT_VIEW_STEP == 0:
-                pts.append([round((pos[0] + w / 2) / 16, 2), round((pos[1] + h / 2) / 16, 2)])
-        out.append({"id": t.entity_id, "kind": t.entity_type, "path": pts})
+    for f in forecast(obs, THREAT_VIEW_TICKS):
+        w, h = (20, 3) if f["kind"] == "plasma" else (24, 21)
+        pts = [[round((x + w / 2) / 16, 2), round((y + h / 2) / 16, 2)]
+               for i, (x, y) in enumerate(f["path"]) if i % THREAT_VIEW_STEP == 0 or i == len(f["path"]) - 1]
+        if len(pts) > 1:
+            out.append({"id": f["id"], "kind": f["kind"], "spawn": f["spawn"], "path": pts})
     return out
 
 

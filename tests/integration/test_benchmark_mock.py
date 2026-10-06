@@ -151,6 +151,9 @@ def test_an_episode_error_is_recorded_as_a_failure_and_the_run_goes_on(config, t
 
 
 def test_live_unpriced_azure_is_refused_before_any_call(config, tmp_path):
+    models = config.models
+    unpriced = {role: getattr(models, role).model_copy(update={"price": None}) for role in ("planner", "tactical_llm")}
+    config = config.model_copy(update={"models": models.model_copy(update=unpriced)})
     built = []
 
     def factory(*args):

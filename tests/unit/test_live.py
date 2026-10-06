@@ -134,3 +134,42 @@ def test_http_routes(config, tmp_path):
         urllib.request.urlopen(urllib.request.Request(f"{base}/start", data=b'{"arm": "Z"}', method="POST"))
     assert err.value.code == 400
     assert urllib.request.urlopen(f"{base}/frame").status == 204  # the fixture has no frames
+
+
+def test_a_graph_arm_streams_its_graph_after_every_skill(config):
+    from dave_agent.memory.graph import GraphStore
+    adapter = FixtureAdapter(LEVELS)
+    graph = GraphStore("fixture", adapter.capabilities().build_id, "local_observed")
+    seen = []
+    goals = GoalManager(RuleMockPlanner(), config.planning, config.models.max_retries)
+    try:
+        result = run_episode(adapter, SeededMockController(seed=3, label="m"), config.skills.for_adapter("fixture"),
+                             config.skills.executor, WorkingMemory.from_config(config), "fixture_l1", 3,
+                             max_frames=200, graph=graph, goals=goals,
+                             on_event=lambda kind, data: seen.append((kind, json.loads(json.dumps(data)))))
+    finally:
+        adapter.close()
+    graphs = [d for k, d in seen if k == "graph"]
+    assert len(graphs) == 1 + len(result.executions)  # once at the start, then after every skill
+    assert graphs[0]["source"] == "learning" and "last" not in graphs[0]
+    assert all(g["last"]["recorded"] for g in graphs[1:])
+    final = graphs[-1]["graph"]
+    assert final["counts"] == graph.get(final["level_id"]).counts()
+    learned = [g["last"]["edge"] for g in graphs[1:] if g["last"]["recorded"] == "success"]
+    edges = {(e["source"], e["target"], e["key"]) for e in final["edges"]}
+    assert all(tuple(e) in edges for e in learned if e)
+
+
+def test_a_run_without_a_graph_streams_no_graph(config):
+    seen = []
+    episode(config, lambda kind, data: seen.append(kind))
+    assert "graph" not in seen
+
+
+def test_hub_keeps_only_the_newest_graph_snapshot():
+    hub = LiveHub()
+    hub.publish("graph", {"n": 1})
+    hub.publish("decision", {"d": 1})
+    hub.publish("graph", {"n": 2})
+    events = hub.events_after(0, 0)
+    assert [e["type"] for e in events] == ["decision", "graph"] and events[-1]["data"] == {"n": 2}

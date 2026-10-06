@@ -21,6 +21,9 @@
   --cell-climb: #4c9a4c;
   --cell-item: #7a7a7a;
   --cell-monster: #d23c8a;
+  /* LLM vs Jev charts: categorical slots 1 and 2, validated (scripts/validate_palette.js) */
+  --series-llm: #2a78d6;
+  --series-jev: #eb6834;
   --mono: ui-monospace, "Cascadia Mono", Consolas, Menlo, monospace;
   color-scheme: light;
 }
@@ -41,6 +44,8 @@
     --danger-soft: #3d1f1a;
     --loop-soft: #2c2440;
     --cell-empty: #232321;
+    --series-llm: #3987e5;
+    --series-jev: #d95926;
     color-scheme: dark;
   }
 }
@@ -60,6 +65,8 @@
   --danger-soft: #3d1f1a;
   --loop-soft: #2c2440;
   --cell-empty: #232321;
+  --series-llm: #3987e5;
+  --series-jev: #d95926;
   color-scheme: dark;
 }
 
@@ -587,7 +594,9 @@ main:has(.live) {
   grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
   grid-template-areas:
     "game feed"
-    "planner planner";
+    "planner planner"
+    "stats stats"
+    "graph graph";
   gap: 16px;
 }
 .game-view {
@@ -604,10 +613,16 @@ main:has(.live) {
 .planner {
   grid-area: planner;
 }
+.stats {
+  grid-area: stats;
+}
+.graph {
+  grid-area: graph;
+}
 @media (max-width: 1000px) {
   .live-grid {
     grid-template-columns: minmax(0, 1fr);
-    grid-template-areas: "game" "feed" "planner";
+    grid-template-areas: "game" "feed" "planner" "stats" "graph";
   }
   .feed {
     max-height: 480px;
@@ -869,4 +884,417 @@ main:has(.live) {
 .badge.route {
   background: var(--accent-soft);
   color: var(--accent);
+}
+.level-map .threat-path.next-shot {
+  stroke-dasharray: 3 2;
+  opacity: 0.8;
+}
+.level-map .monster-path {
+  fill: none;
+  stroke: #b04fd6;
+  stroke-width: 1.5;
+  stroke-dasharray: 2 2;
+}
+.level-map .shot-label {
+  font: bold 7px var(--mono);
+  fill: var(--warn);
+}
+.key.monster {
+  background: #b04fd6;
+  height: 3px;
+}
+
+/* Run stats (components/live/StatsPanel.tsx) */
+.stat-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+}
+.stat-tile {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0.6rem 0.75rem;
+  display: grid;
+  align-content: start;
+  gap: 0.35rem;
+}
+.stat-title {
+  color: var(--muted);
+  font-size: 12px;
+}
+.stat-value {
+  font-size: 26px;
+  font-weight: 600;
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+}
+.stack-bar {
+  display: flex;
+  gap: 2px;
+  height: 10px;
+}
+.stack-seg,
+.stack-empty {
+  min-width: 4px;
+  border-radius: 4px;
+}
+.stack-empty {
+  flex-grow: 1;
+  background: var(--line);
+}
+.stack-legend {
+  list-style: none;
+  margin: 0.3rem 0 0;
+  padding: 0;
+  font-size: 12px;
+}
+.stack-legend b {
+  font-variant-numeric: tabular-nums;
+}
+.stack-key {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  vertical-align: -1px;
+}
+.seg-model {
+  background: var(--accent);
+}
+.seg-forced {
+  background: var(--muted);
+}
+.seg-fallback,
+.seg-warn {
+  background: var(--warn);
+}
+.seg-ok {
+  background: var(--ok);
+}
+.seg-danger {
+  background: var(--danger);
+}
+
+/* LLM vs Jev (components/live/ModelCompare.tsx) */
+.mc {
+  position: relative;
+  margin-top: 14px;
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+}
+.mc-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 16px;
+  margin-bottom: 8px;
+}
+.mc-head h3 {
+  margin: 0;
+  font-size: 14px;
+}
+.mc-scope {
+  margin-left: auto;
+  display: inline-flex;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.mc-scope button {
+  font: inherit;
+  font-size: 12px;
+  padding: 3px 9px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+.mc-scope button.on {
+  background: var(--accent-soft);
+  color: var(--text);
+}
+.mc-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr));
+  gap: 12px 20px;
+}
+.mc-grid.donuts {
+  margin-top: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+}
+.mc-chart {
+  margin: 0;
+  min-width: 0;
+}
+.mc-chart figcaption {
+  font-size: 12px;
+  margin-bottom: 6px;
+}
+.mc-row {
+  display: grid;
+  grid-template-columns: 30px 1fr minmax(64px, auto);
+  align-items: center;
+  gap: 6px;
+  margin: 5px 0;
+  font-size: 12px;
+}
+.mc-label {
+  color: var(--muted);
+}
+.mc-track {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+}
+.mc-bar {
+  height: 14px;
+  min-width: 3px;
+}
+.mc-stack {
+  display: flex;
+  gap: 2px;
+}
+.mc-stack .mc-bar:last-child {
+  border-radius: 0 4px 4px 0;
+}
+.mc-bar.llm,
+.mc-key.llm {
+  background: var(--series-llm);
+}
+.mc-bar.jev,
+.mc-key.jev {
+  background: var(--series-jev);
+}
+.mc-bar.light.llm {
+  background: color-mix(in oklab, var(--series-llm) 45%, var(--panel));
+}
+.mc-bar.light.jev {
+  background: color-mix(in oklab, var(--series-jev) 45%, var(--panel));
+}
+.mc-bar:hover,
+.mc-bar:focus-visible,
+.mc-arc:hover,
+.mc-arc:focus-visible {
+  outline: none;
+  filter: brightness(1.12);
+}
+.mc-value {
+  text-align: right;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.mc-donut {
+  display: grid;
+  justify-items: center;
+}
+.mc-ring {
+  fill: none;
+  stroke: var(--line);
+  stroke-width: 14;
+}
+.mc-arc {
+  fill: none;
+  stroke-width: 14;
+  cursor: default;
+}
+.mc-arc.llm {
+  stroke: var(--series-llm);
+}
+.mc-arc.jev {
+  stroke: var(--series-jev);
+}
+.mc-total {
+  text-anchor: middle;
+  font-size: 11px;
+  font-weight: 600;
+  fill: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.mc-total-sub {
+  text-anchor: middle;
+  font-size: 7px;
+  fill: var(--muted);
+}
+.mc-foot {
+  margin-top: 4px;
+}
+.mc-legend {
+  list-style: none;
+  flex-wrap: wrap;
+  margin: 4px 0 0;
+  padding: 0;
+  display: flex;
+  gap: 12px;
+  font-size: 12px;
+}
+.mc-legend.inline {
+  margin: 0;
+  display: inline-flex;
+}
+.mc-legend b {
+  font-variant-numeric: tabular-nums;
+}
+.mc-key {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  vertical-align: -1px;
+}
+.mc-tip {
+  position: absolute;
+  transform: translate(-50%, calc(-100% - 10px));
+  pointer-events: none;
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 12px;
+  white-space: nowrap;
+  box-shadow: 0 2px 8px rgb(0 0 0 / 0.15);
+  z-index: 5;
+}
+
+/* Learned graph (components/live/GraphPanel.tsx) */
+.graph-map {
+  max-width: none;
+  height: auto;
+  display: block;
+}
+.graph-map .axis {
+  font: 8px var(--mono);
+  fill: var(--muted);
+}
+.gnode-bar {
+  fill: var(--panel);
+  stroke: var(--muted);
+  stroke-width: 1;
+}
+.gnode.visited .gnode-bar {
+  fill: var(--cell-solid);
+  stroke: var(--cell-solid);
+}
+.gnode.here .gnode-bar {
+  stroke: var(--danger);
+  stroke-width: 2;
+}
+.gitem {
+  fill: var(--cell-item);
+}
+.gitem.collectible {
+  fill: var(--cell-loot);
+}
+.gitem.required_item {
+  fill: var(--cell-trophy);
+}
+.gitem.exit {
+  fill: var(--cell-door);
+}
+.gitem.climbable {
+  fill: var(--cell-climb);
+}
+.gdeath {
+  font: bold 8px var(--mono);
+  fill: var(--danger);
+}
+.gedge {
+  fill: none;
+  opacity: 0.85;
+}
+.gedge.ok,
+.arrow-ok {
+  stroke: var(--ok);
+  fill: var(--ok);
+}
+.gedge.warn,
+.arrow-warn {
+  stroke: var(--warn);
+  fill: var(--warn);
+}
+.gedge.danger,
+.arrow-danger {
+  stroke: var(--danger);
+  fill: var(--danger);
+}
+.gedge.ok,
+.gedge.warn,
+.gedge.danger {
+  fill: none;
+}
+.gedge.fresh,
+.arrow-fresh {
+  stroke: var(--accent);
+  fill: var(--accent);
+}
+.gedge.fresh {
+  fill: none;
+  opacity: 1;
+  animation: edge-pulse 1.2s ease-out 2;
+}
+@keyframes edge-pulse {
+  0% {
+    stroke-opacity: 0.2;
+  }
+  50% {
+    stroke-opacity: 1;
+  }
+  100% {
+    stroke-opacity: 0.6;
+  }
+}
+.key.gn-visited {
+  background: var(--cell-solid);
+  height: 4px;
+}
+.key.gn-seen {
+  border: 1px solid var(--muted);
+  height: 4px;
+}
+.key.gn-here {
+  border: 2px solid var(--danger);
+  height: 6px;
+}
+.key.ge-ok {
+  background: var(--ok);
+  height: 3px;
+}
+.key.ge-warn {
+  background: var(--warn);
+  height: 3px;
+}
+.key.ge-danger {
+  background: var(--danger);
+  height: 3px;
+}
+.key.ge-fresh {
+  background: var(--accent);
+  height: 3px;
+}
+.edge-table {
+  border-collapse: collapse;
+  width: 100%;
+}
+.edge-table th,
+.edge-table td {
+  text-align: left;
+  padding: 0.1rem 0.4rem 0.1rem 0;
+  border-bottom: 1px solid var(--line);
+  font-variant-numeric: tabular-nums;
+}
+.edge-table th {
+  color: var(--muted);
+  font-weight: normal;
+}
+.edge-table tr.risky td,
+.fatal-count {
+  color: var(--danger);
+}
+@media (prefers-reduced-motion: reduce) {
+  .gedge.fresh {
+    animation: none;
+  }
 }

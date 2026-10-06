@@ -34,6 +34,12 @@ export function LevelMap({ map, dave, waypoints, goal, heading, path = [], platf
     const [x1, y1] = at([path[i][0], path[i][1]]);
     const [x2, y2] = at([step[0], step[1]]);
     const kind = step[2];
+    const flight = step.length > 3 ? step[3] : null;
+    if (kind === "jump" && flight?.length) {
+      // The simulated flight (Dave's top-left in tile units): drawn through his centre.
+      const pts = flight.map(([fx, fy]) => `${(fx + 0.5 - c0) * C},${(fy + 0.5) * C}`);
+      return { kind, d: `M${x1},${y1} L${pts.join(" L")} L${x2},${y2}` };
+    }
     if (kind === "jump") {
       const top = Math.min(y1, y2) - C * 1.6;
       return { kind, d: `M${x1},${y1} Q${(x1 + x2) / 2},${top} ${x2},${y2}` };
@@ -97,10 +103,22 @@ export function LevelMap({ map, dave, waypoints, goal, heading, path = [], platf
         : straight.length > 1 ? <polyline className="plan-path" points={straight.map((t) => at(t).join(",")).join(" ")} /> : null}
       {threats.map((t) =>
         t.path.length > 1 ? (
-          <polyline key={t.id} className="threat-path" points={t.path.map((p) => atPx(p).join(",")).join(" ")}
-                    markerEnd="url(#arrow-threat)">
-            <title>{`${t.kind}: predicted path`}</title>
-          </polyline>
+          <g key={t.id}>
+            <polyline className={t.kind === "plasma" ? (t.spawn ? "threat-path next-shot" : "threat-path") : "monster-path"}
+                      points={t.path.map((p) => atPx(p).join(",")).join(" ")}
+                      markerEnd={t.kind === "plasma" ? "url(#arrow-threat)" : undefined}>
+              <title>
+                {t.kind === "plasma"
+                  ? t.spawn ? `next shot, fired in ${t.spawn} ticks` : "shot: predicted path until it hits a wall"
+                  : `${t.kind}: its route (monsters fly through walls)`}
+              </title>
+            </polyline>
+            {t.spawn ? (
+              <text className="shot-label" x={atPx(t.path[0])[0]} y={atPx(t.path[0])[1] - 3} textAnchor="middle">
+                {t.spawn}
+              </text>
+            ) : null}
+          </g>
         ) : null,
       )}
       {deaths.filter((d) => d.tile).map((d, i) => {

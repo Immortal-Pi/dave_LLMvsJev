@@ -88,3 +88,47 @@ def test_a_death_leaves_an_incident_with_its_cause():
                        "r#1")
     (node,) = [d for _, d in s.levels["L1"].g.nodes(data=True) if d["incidents"]]
     assert node["incidents"] == [{"skill": "move_left_1", "cause": "fire", "tile": [2, 3], "ref": "r#1"}]
+
+
+def test_rekey_ties_a_store_to_the_current_build_and_keeps_what_it_learned(tmp_path, capsys):
+    from dave_agent.adapters.fixture import BUILD_ID
+    from dave_agent.cli import main
+
+    path = save_store(learned(), tmp_path / "arm-C")
+    before = {f.name: json.loads(f.read_text()) for f in path.glob("*.json")}
+    assert main(["graph", "--checkpoint", str(path), "--rekey", "fixture"]) == 0
+    assert json.loads(capsys.readouterr().out)["build_id"] == BUILD_ID
+    for name, old in before.items():
+        new = json.loads((path / name).read_text())
+        assert new["build_id"] == BUILD_ID and old["build_id"] == "test"
+        same = lambda c: {k: v for k, v in c.items() if k not in ("build_id", "parent_sha256")}  # noqa: E731
+        assert same(new) == same(old)  # parent_sha256: the pre-rekey file, as on every save
+        assert json.loads((path / f"{name}.prekey").read_text()) == old
+    load_store(path, "fixture", BUILD_ID, "local_observed")
+
+
+def test_rekey_refuses_another_adapter(tmp_path):
+    from dave_agent.cli import main
+
+    s = GraphStore("dave", "test", "local_observed")
+    s.for_level("L1")
+    path = save_store(s, tmp_path / "arm-C")
+    assert main(["graph", "--checkpoint", str(path), "--rekey", "fixture"]) == 2
+    assert json.loads((path / "L1.json").read_text())["build_id"] == "test"
+
+
+def test_view_is_json_ready_and_reads_only():
+    import copy
+
+    from dave_agent.memory.graph import success_probability
+    s = learned()
+    graph = s.levels["L1"]
+    before = copy.deepcopy((dict(graph.g.nodes(data=True)), list(graph.g.edges(keys=True, data=True))))
+    view = json.loads(json.dumps(graph.view()))
+    assert (dict(graph.g.nodes(data=True)), list(graph.g.edges(keys=True, data=True))) == before
+    assert view["level_id"] == "L1" and view["counts"] == graph.counts()
+    assert len(view["nodes"]) == graph.g.number_of_nodes()
+    (edge,) = view["edges"]
+    (_, _, data), = graph.g.edges(data=True)
+    assert edge["skill"] == "jump_right" and edge["attempts"] == 1
+    assert edge["p"] == round(success_probability(data), 3)

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import sys
 import uuid
 from datetime import UTC, datetime
@@ -34,6 +35,7 @@ from dave_agent.control.goals import TargetMemory, goal_candidates
 from dave_agent.control.skills import generate_candidates
 from dave_agent.logging_setup import configure_logging
 from dave_agent.memory.episodes import EpisodeStore, StoreError
+from dave_agent.memory.graph import GraphStore
 from dave_agent.memory.persistence import GraphCheckpointError, export_store_yaml, load_store, save_store, store_dir
 from dave_agent.memory.routes import find_route
 from dave_agent.memory.working import WorkingMemory
@@ -306,6 +308,8 @@ def _cmd_inspect(args: argparse.Namespace) -> int:
 def _cmd_graph(args: argparse.Namespace) -> int:
     config = load_config(args.config)
     store = load_store(args.checkpoint)
+    if args.rekey:
+        _rekey(store, args.checkpoint, config, args.rekey)
     report: dict = {"checkpoint": str(store_dir(args.checkpoint)), "adapter": store.adapter,
                     "build_id": store.build_id, "observation_policy": store.observation_policy,
                     "episodes": len(store.lineage), **store.counts(),
@@ -323,6 +327,30 @@ def _cmd_graph(args: argparse.Namespace) -> int:
                            "frontier": list(route.frontier)}
     print(json.dumps(report, indent=2))
     return 0
+
+
+def _rekey(store: GraphStore, checkpoint: Path, config: AppConfig, adapter_name: str) -> None:
+    """Tie a graph store to the current game build, keeping every node and edge. Only for a
+    build whose physics and levels did not change (e.g. an older build id scheme); each level
+    file is first copied to ``<level>.json.prekey``."""
+    adapter = create_adapter(adapter_name, config.environment)
+    try:
+        caps = adapter.capabilities()
+    finally:
+        adapter.close()
+    policy = config.environment.observation_policy
+    if (store.adapter, store.observation_policy) != (caps.adapter, policy):
+        raise GraphCheckpointError(
+            f"{checkpoint}: adapter/policy {store.adapter}/{store.observation_policy} differ from "
+            f"{caps.adapter}/{policy}; only the build id can be re-keyed")
+    directory = store_dir(checkpoint)
+    for file in directory.glob("*.json"):
+        shutil.copy2(file, file.with_name(file.name + ".prekey"))
+    print(f"rekey {directory}: {store.build_id} -> {caps.build_id}", file=sys.stderr)
+    store.build_id = caps.build_id
+    for graph in store.levels.values():
+        graph.build_id = caps.build_id
+    save_store(store, directory)
 
 
 def _cmd_export(args: argparse.Namespace) -> int:
@@ -416,6 +444,9 @@ def build_parser() -> argparse.ArgumentParser:
     graph.add_argument("--yaml", type=Path, help="write a YAML inspection export here")
     graph.add_argument("--route", nargs=2, metavar=("FROM", "TO"), help="node ids")
     graph.add_argument("--items", help="held items for --route, comma-separated (e.g. trophy,gun)")
+    graph.add_argument("--rekey", metavar="ADAPTER", choices=("dave", "fixture"),
+                       help="tie the checkpoint to ADAPTER's current build id, keeping what it learned "
+                            "(only when the game's physics and levels did not change)")
     graph.set_defaults(func=_cmd_graph)
 
     replay = sub.add_parser("replay", help="re-run exported episodes and verify the recorded evidence")

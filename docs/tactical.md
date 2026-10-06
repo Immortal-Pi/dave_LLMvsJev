@@ -34,12 +34,13 @@ The provider-neutral text lives in `models/tactical.py` and is sent to every pro
 
 The tactical model only sees the goal, one waypoint and the offered skills, so a planned route has to reach it through the options. With a reach envelope, `GoalManager._route_notes` (`control/goals.py`) takes the first move of the estimated path to the waypoint and marks, for every arm alike:
 - the skills whose estimated end is that move's landing: `route: makes the next move (jump to [8, 4])`;
-- else the walks that keep Dave on his platform and end where one of the catalog's jumps would make the move (simulated from that spot): `route: walks to the take-off for the jump to [8, 4]`. A jump that only works from a platform's end needs this walk first (level 2: `move_right_1` from x 56 to x 72 on the ledge at (4,3), then `jump_right`);
+- else the walks that keep Dave on his platform, touch no hazard, and lead within up to 3 walks (`TAKEOFF_WALKS`) to a spot from which one of the catalog's jumps makes the move (simulated): `route: walks to the take-off (2 walks) for the jump to [12, 6]`. The first walk of the shortest sequence is marked. A jump that only works from a platform's end needs this walk first (level 2: `move_right_1` from x 56 to x 72 on the ledge at (4,3); level 3: two walks left between two vine clumps before the jump over the right one);
+- skills the threat screen will remove are never marked;
 - when only walking is left, the walks toward the waypoint: `route: toward [x, y]`.
 
 The note leads the description (after a `danger:` note), and the task text says to prefer a `route:` option unless it is dangerous. Masked skills stay masked.
 
-**Checked on the real game:** a scripted controller that always takes the first `route:` option (random otherwise), with the rule planner, completes level 1 and level 2 with no deaths; on level 2 its first seven moves are the opening of the breadth-first search route. On level 3 it took the gun but not the trophy within 18,000 frames.
+**Checked on the real game:** a scripted controller that always takes the first `route:` option (random otherwise), with the rule planner, completes level 1 and level 2 with no deaths; on level 2 its first seven moves are the opening of the breadth-first search route. On level 3 it took the gun but not the trophy within 18,000 frames; with the take-off search, mid-jump screening and shot prediction its deaths there fell from 4 to 1 (the remaining one: a spider scrolled into view next to Dave mid-jump). On level 4 it survived the swirl's constant fire with 2 deaths in 18,000 frames.
 
 ## Output, retry and fallback
 

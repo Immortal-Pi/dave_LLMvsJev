@@ -64,5 +64,6 @@ def test_unknown_predicate_rejected(config_copy):
 def test_catalogs_exist_for_both_adapters(config):
     assert {s.name for s in config.skills.for_adapter("fixture")} >= {"move_left", "wait"}
     dave = {s.name: s for s in config.skills.for_adapter("dave")}
-    assert "jetpack" not in str(dave) and "climb_up" not in dave  # unverified: excluded
+    assert "climb_up" not in dave  # unverified: excluded
+    assert {"jetpack_on", "jetpack_off", "fly_up_1", "fly_right_3"} <= set(dave)  # verified 2026-10-04
     assert all(s.max_frames <= 600 for s in dave.values())

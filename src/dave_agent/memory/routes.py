@@ -6,6 +6,10 @@ Edge cost, normalized (docs/graph.md):
          + wr * -log(clip(success_p, p_min, p_max))
          + wu * 1 / (attempts + 1)
 
+With a goal's ``target_ref``, an edge's cost is also scaled by its start platform's goal credit
+for that skill and target (control/credit.py; ``credit_factor``): moves that led to the target in
+past goals cost less, moves tried for it that never led there cost more.
+
 The reliability term treats edge outcomes as independent. Correlated failures and
 state-dependent enemy behaviour violate that, so it is an approximation.
 Dijkstra suits these non-negative additive costs. Between two nodes the cheapest usable
@@ -60,12 +64,27 @@ def edge_cost(edge: dict[str, Any], cfg: GraphConfig) -> float:
             + cfg.weights.uncertainty / (edge["attempts"] + 1))
 
 
+def credit_factor(rec: dict[str, int] | None, cfg: GraphConfig) -> float:
+    """Cost multiplier from one ``skill|target`` credit record: 1 with no past goals, down to
+    ``1 - credit_bonus`` when every goal that used the move was achieved, up to
+    ``1 + credit_penalty`` when none was."""
+    if not rec or not rec.get("goals"):
+        return 1.0
+    rate = rec["reached"] / rec["goals"]
+    return 1.0 + cfg.credit_penalty * (1.0 - rate) - cfg.credit_bonus * rate
+
+
 def _usable(edge: dict[str, Any], items: frozenset[str]) -> bool:
     return set(edge["inventory_context"]) <= items
 
 
-def _best(edges: dict[str, dict[str, Any]], items: frozenset[str], cfg: GraphConfig) -> tuple[str, float] | None:
-    options = sorted((edge_cost(d, cfg), k) for k, d in edges.items() if _usable(d, items))
+def _best(edges: dict[str, dict[str, Any]], items: frozenset[str], cfg: GraphConfig,
+          credit: dict[str, Any] | None = None, target_ref: str | None = None) -> tuple[str, float] | None:
+    def cost(d: dict[str, Any]) -> float:
+        factor = credit_factor(credit.get(f"{d['skill']}|{target_ref}"), cfg) if credit and target_ref else 1.0
+        return edge_cost(d, cfg) * factor
+
+    options = sorted((cost(d), k) for k, d in edges.items() if _usable(d, items))
     return (options[0][1], options[0][0]) if options else None
 
 
@@ -75,12 +94,16 @@ def target_requirements(graph: WorldGraph, node: str) -> tuple[str, ...]:
 
 
 def find_route(graph: WorldGraph, start: str, target: str, inventory: dict[str, int] | None,
-               cfg: GraphConfig) -> Route:
+               cfg: GraphConfig, target_ref: str | None = None) -> Route:
+    """The cheapest learned route; ``target_ref`` (the goal's) weighs edges by goal credit."""
     start, target = graph.resolve(start), graph.resolve(target)
     items = held_items(inventory)
 
+    def credit(u: str) -> dict[str, Any] | None:
+        return graph.g.nodes[u].get("credit") if target_ref else None
+
     def weight(u: str, v: str, edges: dict) -> float | None:
-        best = _best(edges, items, cfg)
+        best = _best(edges, items, cfg, credit(u), target_ref)
         return None if best is None else best[1]
 
     if start not in graph.g:
@@ -99,7 +122,7 @@ def find_route(graph: WorldGraph, start: str, target: str, inventory: dict[str, 
     path = nx.dijkstra_path(graph.g, start, target, weight=weight)
     steps = []
     for u, v in zip(path, path[1:]):
-        key, cost = _best(graph.g.get_edge_data(u, v), items, cfg)  # type: ignore[misc]
+        key, cost = _best(graph.g.get_edge_data(u, v), items, cfg, credit(u), target_ref)  # type: ignore[misc]
         steps.append(RouteStep(u, v, key, graph.g.edges[u, v, key]["skill"], cost))
     return Route("found", start, target, nodes=tuple(path), steps=tuple(steps), cost=lengths[target])
 

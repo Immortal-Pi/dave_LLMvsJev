@@ -25,10 +25,10 @@ index 90b24fd..ee7b688 100644
  #set_property(TARGET deadly-dave)
 diff --git a/bridge.c b/bridge.c
 new file mode 100644
-index 0000000..e0dd974
+index 0000000..2d82198
 --- /dev/null
 +++ b/bridge.c
-@@ -0,0 +1,340 @@
+@@ -0,0 +1,349 @@
 +/*
 + * Headless stepping bridge for research harnesses.
 + *
@@ -74,7 +74,7 @@ index 0000000..e0dd974
 +int game_level(game_context_t *game, tile_t *map, keys_state_t *keys);
 +int dave_on_ground(dave_t *dave, tile_t map[TILEMAP_WIDTH * TILEMAP_HEIGHT]);
 +
-+#define BRIDGE_PROTOCOL 1
++#define BRIDGE_PROTOCOL 2
 +#define MAX_RELEASE_TICKS 200
 +
 +static game_context_t *g_game = NULL;
@@ -203,9 +203,9 @@ index 0000000..e0dd974
 +           (long)g_game->scroll_offset, g_last_scrolling);
 +    printf(",\"dave\":{\"x\":%d,\"y\":%d,\"w\":%d,\"h\":%d,\"state\":%d,\"face\":%d,"
 +           "\"has_trophy\":%d,\"has_gun\":%d,\"jetpack_bars\":%d,\"on_fire\":%d,\"on_tree\":%d,"
-+           "\"jump_state\":%d,\"grounded\":%d}",
++           "\"jump_state\":%d,\"jump_cooldown\":%d,\"grounded\":%d}",
 +           d->tile->x, d->tile->y, d->tile->width, d->tile->height, d->state, d->face_direction,
-+           d->has_trophy, d->has_gun, d->jetpack_bars, d->on_fire, d->on_tree, d->jump_state,
++           d->has_trophy, d->has_gun, d->jetpack_bars, d->on_fire, d->on_tree, d->jump_state, d->jump_cooldown_count,
 +           dave_on_ground(d, g_map));
 +    printf(",\"monsters\":[");
 +    int first = 1;
@@ -215,8 +215,17 @@ index 0000000..e0dd974
 +        printf("%s{\"idx\":%d,\"sprite\":%d,\"x\":%d,\"y\":%d,\"w\":%d,\"h\":%d,\"state\":%d,\"alive\":%d",
 +               first ? "" : ",", i, m->tile->sprites[0], m->tile->x, m->tile->y, m->tile->width,
 +               m->tile->height, m->state, m->is_alive(m));
++        /* Movement and firing state (monster.c monster_state_active_routine): the route of
++         * (dx, dy) steps, one step every 5 ticks, and the countdown to the next plasma. */
++        printf(",\"route_idx\":%d,\"cooldown\":%d,\"ticks_before_shoot\":%d,\"fire_rate\":%d,\"route\":[",
++               m->route_idx, m->cooldown, m->ticks_before_shoot, m->fire_rate);
++        for (int r = 0; r < m->route_sz; r++) {
++            printf("%s%d", r ? "," : "", m->route[r]);
++        }
++        printf("]");
 +        if (m->plasma != NULL) {
-+            printf(",\"plasma\":{\"x\":%d,\"y\":%d}", m->plasma->tile->x, m->plasma->tile->y);
++            printf(",\"plasma\":{\"x\":%d,\"y\":%d,\"speed\":%d,\"dead\":%d}", m->plasma->tile->x,
++                   m->plasma->tile->y, m->plasma->speed_x, m->plasma->is_dead(m->plasma));
 +        }
 +        printf("}");
 +        first = 0;
