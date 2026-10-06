@@ -27,7 +27,7 @@ def test_notes_for_tried_skills_only():
 def test_mixed_deaths_and_cap():
     here = {"s": Experience(attempts=12, deaths=3, burned=1, no_move=4, last_end=TilePos(col=12, row=10))}
     past = {"s": {"attempts": 120, "successes": 100, "fatal": 20, "lands": (10, 3, 14)}}
-    (out,) = annotate_experience([cand("s", "x" * 150)], here, past)
+    (out,) = annotate_experience([cand("s", "x" * (MAX_DESCRIPTION - 50))], here, past)
     assert len(out.description) == MAX_DESCRIPTION
     (out,) = annotate_experience([cand("s", "")], here)
     assert out.description == "this episode from here: 12x, 3 died (1 burned), 4 did not move, last end [12,10]"

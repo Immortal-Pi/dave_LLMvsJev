@@ -80,6 +80,7 @@ Each level's graph is a NetworkX `MultiDiGraph`. It is used only by graph-enable
   - reachable nodes with an open side, by cost;
   - then discovered nodes that were never visited, by id.
 - **Ties** break deterministically by insertion order, which a JSON round trip preserves.
+- **Goal credit:** with the goal's `target_ref` (the goal manager passes it), each edge's cost is multiplied by its start platform's credit for that skill and target (`credit_factor`): `1 + credit_penalty * (1 - rate) - credit_bonus * rate`, where `rate` is the share of past goals for that target that used the move from that platform and were achieved. With no past goal the factor is 1. `graph.credit_bonus` (0.5) and `graph.credit_penalty` (1.0) are not calibrated. Credit is stored on nodes as `credit` (`docs/memory.md`, "Goal credit"). The attribute is optional, so older checkpoints load unchanged, and merging two nodes adds their credit.
 
 `RouteTracker` follows a route at decision boundaries only. It returns a replan reason in this order: `target_reached`, `edge_failed`, `inventory_changed`, `topology_changed` (when `topology_version` changed, i.e. a node or edge was added or merged), or `off_route`.
 
@@ -94,6 +95,8 @@ Each level's graph is a NetworkX `MultiDiGraph`. It is used only by graph-enable
   The JSON is sorted, so identical learning gives byte-identical files (tested on the real game).
 - **Atomic save:** for each level file, write `<path>.tmp` and fsync it, copy the current file to `<path>.bak`, then `os.replace`. An interrupted save leaves the previous checkpoint intact (tested). Lineage is added to every level in the store at save time.
 - **Load:** a schema, adapter, build or observation-policy mismatch is rejected with `GraphCheckpointError`. Learned routes do not transfer across builds.
+- **Build id** (deadly-dave, `adapters/dave.py` `build_id`): `deadly-dave-<hash>`, a hash of the game's own sources and levels (`*.c` except `bridge.c`, `include/`, `res/levels/`, line endings normalised). Rebuilding or re-patching the bridge, which only reports state, keeps it; changing the physics or the levels changes it. The bridge protocol is checked separately at the handshake. Without the sources, the bridge executable's hash is used (`deadly-dave-bridge-p<protocol>-<hash>`, the scheme before 2026-10-04).
+- **Re-key:** `dave-agent graph --checkpoint DIR --rekey dave` ties a store to the current build id and keeps every node and edge. Each level file is first copied to `<level>.json.prekey`, and the adapter and observation policy must already match. Use it only when the game's physics and levels did not change, e.g. for checkpoints written under the old executable-hash id.
 - **YAML:** `export_yaml` (one level) and `export_store_yaml` (every level) are for inspection only.
 - **Per-arm stores:** `dave-agent play --arm C` loads or creates `artifacts/graphs/arm-C/<adapter>/` (`level1.json`, `level2.json`, …), or `--graph PATH` / `memory.graph_checkpoint` if set. It learns when `memory.graph_updates` is true, then saves. Use one store per arm and trial; arms A and B never create or read one.
 

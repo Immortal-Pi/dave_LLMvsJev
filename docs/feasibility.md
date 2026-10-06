@@ -57,7 +57,7 @@ Behavior:
 | reset | supported | **verified** | `test_level1_start_state`: Dave at (32,144), 4 lives |
 | observe structured state | supported | **verified** | `docs/state_mapping.md`; screenshot cross-check |
 | exact frame step | supported | **verified** | `test_multi_tick_step_matches_single_ticks` |
-| input press/release | supported | **verified** (held keys per tick) | jump and pickup tests; jetpack not yet exercised |
+| input press/release | supported | **verified** (held keys per tick) | jump and pickup tests; jetpack verified 2026-10-04 (`docs/skills.md`) |
 | snapshot/restore | supported | **verified** (input replay) | `test_snapshot_restores_identical_future` |
 | headless | supported | **verified** | no window is created; dummy audio |
 | death/respawn signal | supported | **verified** | `test_fire_death_respawns_at_start` (level 2 fire floor) |
@@ -77,6 +77,7 @@ Behavior:
 - **Secret level:** level 5 has a warp-down secret, reached by walking off the map's left or right edge.
 - **Monsters:** sun, spider, swirl, bones, UFO, guard. Each follows a fixed `route[]` and can shoot plasma. Bullets kill them.
 - **Note:** the Dave–monster *body* collision loop only checks `monsters[0..4]` (`game_level`), while the plasma check covers all 10. This is recorded as an observed implementation detail, not something to correct.
+- **Monster movement and firing** (`monster.c` `monster_state_active_routine`, verified against the bridge 2026-10-04): each monster type has a fixed route of `(dx, dy)` steps (`spidy_path` level 3, `swirl_path` level 4, `sun_path` level 5, ...), one step every 5 ticks, through walls. With no plasma out, `ticks_before_shoot` counts down from `fire_rate` (swirl 5, bones 25, others 50) and a plasma is created at 0 toward Dave's side. Each tick runs Dave, then the monsters, then the plasmas (`game.c`). Bridge protocol 2 exports `route`, `route_idx`, `cooldown`, `ticks_before_shoot`, `fire_rate` and the plasma's `speed` and `dead` flag. Bridge changes like this one do not change the build id that learned graphs are tied to: it hashes the game's sources and levels, not the bridge (`docs/graph.md`).
 
 ## 4. Jev contract (OpenRouter decisions route)
 

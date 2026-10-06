@@ -15,9 +15,11 @@ from dataclasses import dataclass, field
 
 from dave_agent.adapters.base import GameAdapter
 from dave_agent.config import ExecutorConfig, SkillSpec
-from dave_agent.control.predicates import check
-from dave_agent.control.threats import STANDING_STATES, imminent, threats, time_to_contact
+from dave_agent.control.predicates import check, screen_still
+from dave_agent.control.threats import STANDING_STATES, imminent, scripted_shots, threat_key, threats, time_to_contact
 from dave_agent.schemas import Event, Observation, SkillCandidate, StepResult
+
+MAX_FROZEN_TICKS = 64  # a skill waits out at most four screen scrolls (16 ticks each)
 
 # Entity types that never threaten Dave (his own bullet).
 HARMLESS_ENTITIES = frozenset({"bullet"})
@@ -53,6 +55,7 @@ class ExecutionResult:
     observation: Observation
     events: list[Event] = field(default_factory=list)
     steps: list[StepResult] = field(default_factory=list)
+    frozen_ticks: int = 0  # frames the game ignored input while the screen scrolled (not in input_ticks)
 
 
 def generate_candidates(
@@ -133,6 +136,14 @@ def _new_hazard(obs: Observation, seen: frozenset[str], radius: int) -> str | No
     return None
 
 
+def _sighted(obs: Observation, seen: frozenset[str]) -> str | None:
+    """A monster or plasma that was not in view when the skill started, anywhere on screen: the
+    screen scrolled mid-move, or it came in from the side (level 3: a jump across the screen edge
+    met the spider's plasma, unseen at take-off)."""
+    return next((e.entity_id for e in obs.entities
+                 if e.visible and e.entity_type not in HARMLESS_ENTITIES and e.entity_id not in seen), None)
+
+
 def _incoming(obs: Observation, expected: frozenset[str], cfg: ExecutorConfig) -> str | None:
     """A threat predicted to touch Dave within ``interrupt_ticks`` if he stays put, other than
     one already predicted when the skill started (the choice took those into account). Only
@@ -142,7 +153,7 @@ def _incoming(obs: Observation, expected: frozenset[str], cfg: ExecutorConfig) -
     for threat in threats(obs):
         if threat.entity_id not in expected:
             contact = time_to_contact(obs, cfg.threats, threat.entity_id)
-            if contact is not None:
+            if contact is not None and threat_key(contact.what) not in expected:
                 return f"{contact.what}@{contact.tick}"
     return None
 
@@ -161,6 +172,10 @@ def _interrupt(spec: SkillSpec, step: StepResult, seen: frozenset[str], cfg: Exe
         entity = _new_hazard(obs, seen, cfg.hazard_radius_px)
         if entity is not None:
             return f"new_hazard_nearby:{entity}"
+    if "threat_sighted" in rules:
+        entity = _sighted(obs, seen)
+        if entity is not None:
+            return f"threat_sighted:{entity}"
     if "threat_incoming" in rules:
         threat = _incoming(obs, expected, cfg)
         if threat is not None:
@@ -201,20 +216,32 @@ def execute(
         Event(event_type="skill_started", frame=observation.frame,
               payload={"candidate_id": candidate.candidate_id, "skill": spec.name}, **base)
     )
-    seen = frozenset(e.entity_id for e in observation.entities)
+    # Entities already visible, and the shots of monsters whose motion is known: those were
+    # predicted when the skill was chosen, so their appearing does not stop it (level 4: a jump
+    # chosen to dodge the swirl's next shot was stopped before take-off when the shot appeared).
+    seen = frozenset(e.entity_id for e in observation.entities) | scripted_shots(observation)
     # Threats that would already reach a standing Dave soon: the choice took these into account.
     expected = imminent(observation, cfg.threats) if "threat_incoming" in spec.interrupt_on else frozenset()
     for index, phase in enumerate(spec.phases):
         buttons = frozenset(phase.buttons)
         satisfied = False
-        for _ in range(phase.budget):
+        ticks = 0
+        while ticks < phase.budget:
+            # While the screen scrolls the game moves nothing and ignores the keys: those ticks do
+            # not count, or a fixed hold ends early (level 3: jump_right_5 across the screen edge
+            # let go 16 ticks early and dropped into the fire short of the pillar).
+            frozen = not screen_still(result.observation) and result.frozen_ticks < MAX_FROZEN_TICKS
             step = adapter.step(buttons, 1)
             if step.applied_buttons != buttons:
                 raise RuntimeError(f"adapter applied {sorted(step.applied_buttons)}, expected {sorted(buttons)}")
             result.steps.append(step)
             result.events.extend(step.events)
             result.frames += step.frames_advanced
-            result.input_ticks += 1
+            if frozen:
+                result.frozen_ticks += 1
+            else:
+                ticks += 1
+                result.input_ticks += 1
             result.observation = step.observation
             reason = _interrupt(spec, step, seen, cfg, expected)
             if reason is not None:

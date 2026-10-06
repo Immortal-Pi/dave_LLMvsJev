@@ -41,6 +41,7 @@ from dave_agent.runner.session import budget_notice, build_models, episode_summa
 log = logging.getLogger(__name__)
 
 DAVE_LEVELS = tuple(f"level{i}" for i in range(1, 10))
+LATEST_ONLY = frozenset({"graph"})  # a full snapshot each time (~10-20 KB): keep the newest only
 MAX_EVENTS = 20000  # per run; older events are dropped from the replay buffer
 
 
@@ -70,6 +71,8 @@ class LiveHub:
             self._publish(kind, data)
 
     def _publish(self, kind: str, data: dict[str, Any]) -> None:
+        if kind in LATEST_ONLY:  # the viewer draws only the newest, so a replay needs no older copy
+            self._events = [e for e in self._events if e["type"] != kind]
         self._seq += 1
         self._events.append({"seq": self._seq, "type": kind, "data": data})
         del self._events[:-MAX_EVENTS]

@@ -131,3 +131,40 @@ def test_watch_mode_command_line():
 def test_monster_sprite_mapping():
     assert monster_type(89) == "spider" and monster_type(100) == "sun" and monster_type(112) == "guard"
     assert monster_type(5) == "unknown"
+
+
+def test_monster_route_and_shots_are_predicted_exactly(dave):
+    """Level 4's swirl replays monster.c: its route and every plasma it fires (including the
+    shots not fired yet when the forecast is made) match the game tick by tick."""
+    from pathlib import Path
+
+    from dave_agent.config import load_config
+    from dave_agent.control.skills import execute, generate_candidates
+    from dave_agent.control.threats import forecast
+
+    config = load_config(Path(ROOT) / "configs" / "benchmark_dave.yaml")
+    # The walk to the swirl, without stopping when it comes into view (threat_sighted).
+    catalog = tuple(s.model_copy(update={"interrupt_on": tuple(r for r in s.interrupt_on if r != "threat_sighted")})
+                    for s in config.skills.for_adapter("dave"))
+    obs = dave.reset("level4", 0)
+    for skill in ["move_right_1", "move_right_3", "jump_right", "move_right_3", "jump_right", "jump_left",
+                  "jump_right"]:
+        cand = next(c for c in generate_candidates(catalog, dave.capabilities().buttons, obs).candidates
+                    if c.skill == skill)
+        obs = execute(dave, cand, catalog, obs, config.skills.executor).observation
+    for _ in range(400):
+        if any(e.motion and e.entity_id.startswith("monster") for e in obs.entities):
+            break
+        obs = dave.step(frozenset(), 1).observation
+    swirl = next(e for e in obs.entities if e.motion and e.entity_id.startswith("monster"))
+    assert swirl.entity_type == "swirl" and swirl.motion["fire_rate"] == 5
+    ticks = 120
+    predicted = forecast(obs, ticks)
+    real = [{e.entity_id: (e.position.x, e.position.y) for e in dave.step(frozenset(), 1).observation.entities}
+            for _ in range(ticks)]
+    route = next(f for f in predicted if f["id"] == swirl.entity_id)["path"][1:]
+    assert all(real[t].get(swirl.entity_id) in (None, route[t]) for t in range(ticks))
+    shots = {(f["spawn"] or 1) + i: pos for f in predicted if f["kind"] == "plasma" for i, pos in enumerate(f["path"])}
+    seen = {t + 1: pos for t, frame in enumerate(real) for eid, pos in frame.items() if eid.startswith("plasma")}
+    assert seen and seen == {t: shots[t] for t in seen}
+    assert any(f["spawn"] for f in predicted if f["kind"] == "plasma")  # at least one shot fired later

@@ -79,9 +79,10 @@ def started(outputs, first=None):
 # -- reach: jumps from a platform's end --------------------------------------------------
 def test_jump_from_the_ledge_end_reaches_the_top_platform():
     """Real game (scripts/try_skills.py, level 2): Dave walks to x 72 on the one-tile ledge at
-    (4,3), overhanging it, and jump_right lands at (8,4). From mid-cell it falls short."""
+    (4,3), overhanging it, and jump_right lands at (8,4). From mid-cell it falls short. Going left
+    he stands out to x 55 (dave.c dave_on_ground tests x+4 .. x+9)."""
     m = reach()
-    assert m.edge_x((4, 3), 1) == 75 and m.edge_x((4, 3), -1) == 56
+    assert m.edge_x((4, 3), 1) == 75 and m.edge_x((4, 3), -1) == 55
     assert m.fly((4, 3), 1, None) != (8, 4)
     assert (8, 4) in {cell for cell, kind, _ in m.moves((4, 3)) if kind == "jump"}
 
@@ -110,8 +111,10 @@ def test_platforms_exits_and_reachability():
 
 def test_candidate_path_is_the_climb_over_the_left_ledges():
     p = Platforms(reach(), (1, 9))
+    # To c11r6, the take-off of the 5-tile jump that takes the trophy in flight and drops into
+    # its pocket (real game: level 2 completes that way, 3793 frames).
     assert p.path_note((13, 6)) == ("c1r9 -jump right-> c4r7 -jump left-> c2r5 -jump right-> c4r3 "
-                                    "-jump right-> c8r4 -jump right-> c13r8")
+                                    "-jump right-> c8r4 -jump right-> c11r6")
     pit = Platforms(reach(grid=TRAP), (6, 8))
     assert pit.path_note((2, 5)) == "no known path over the explored platforms; nearest reachable platform: c5r8"
     assert pit.items["c1r5"].hops is None and pit.items["c5r8"].hops == 0
@@ -121,10 +124,15 @@ def test_request_carries_platforms_and_paths():
     gm, planner, mem, step = started([plan(TROPHY)])
     request = planner.requests[0]
     trophy = next(c for c in request.candidates if c.candidate_id == TROPHY)
-    assert trophy.path.endswith("-jump right-> c13r8")
+    assert trophy.path.endswith("-jump right-> c11r6")  # the take-off that grabs it in flight
     assert any(v["id"] == "c13r8" and v.get("items") == [TROPHY] for v in request.platforms)
     assert step.events[-1].payload["path"][0] == [1, 9, "start"]
-    assert step.events[-1].payload["path"][-1] == [13, 8, "jump"]
+    last = step.events[-1].payload["path"][-1]
+    assert last[:3] == [11, 6, "jump"]
+    # The jump carries its simulated flight (tile units): from the take-off on c8r4 down to c11r6.
+    flight = last[3]
+    assert flight[0] == [8.0, 4.0] and abs(flight[-1][0] - 11) < 1 and flight[-1][1] <= 6
+    assert min(y for _, y in flight) < 4  # it rises before it falls
 
 
 # -- waypoints checked with the physics ----------------------------------------------------
@@ -253,7 +261,7 @@ def test_route_notes_mark_the_walk_to_the_ledge_end_then_the_jump():
     notes = {c.skill: c.description for c in gm.annotate(edge, candidates, catalog)[0]}
     assert notes["jump_right"].startswith("route: makes the next move (jump to [8, 4])")
     marked = {s for s, d in notes.items() if d.startswith("route:")}
-    assert marked == {"jump_right", "jump_right_short"}  # both land on (8,4) from the ledge end
+    assert marked == {"jump_right", "jump_right_short", "jump_right_4"}  # all land on (8,4) from the ledge end
 
 
 def test_failed_moves_are_real_moves_and_clear_once_made():
@@ -273,3 +281,103 @@ def test_failed_moves_are_real_moves_and_clear_once_made():
     gm.observe(landed)
     gm.update(landed, mem, [])
     assert gm.log.failures() == {}
+
+
+def test_take_off_away_from_the_vine():
+    """A tunnel: Dave between two fires under a low ceiling; the jump over the right one does not
+    clear it from the platform's end. One walk left is the take-off of the 4-tile jump, which
+    lands on the gem (before the 4- and 5-tile jumps: two walks and the long jump)."""
+    tunnel = ("....................", "####################", "####################", "####################",
+              "#..................#", "#..................#", "#....F...F.*.......#", "####################")
+    first = obs(grid=tunnel, cols=(0, 19), level="tunnel", player=(8, 6))
+    gm, planner, mem, step = started([plan("collect:gem:c11:r6")], first=first)
+    path = step.events[-1].payload["path"]
+    assert [p[:3] for p in path] == [[8, 6, "start"], [7, 6, "walk"], [11, 6, "jump"]]
+    assert min(y for _, y in path[2][3]) >= 4  # the flight stays under the ceiling (row 3)
+    candidates, catalog = offered(first)
+    notes = {c.skill: c.description for c in gm.annotate(first, candidates, catalog)[0]}
+    assert notes["move_left_1"].startswith("route: walks to the take-off for the jump to [11, 6]")
+    assert [s for s, d in notes.items() if d.startswith("route:")] == ["move_left_1"]
+
+
+# Dave level 3's vine tunnel as the bridge reports it, with the gun (as a gem here) floating at
+# (10,4) over the vine at (9,6): it is taken only in flight. On the real game Dave lands from the
+# start at x 126 on (8,6), where every jump right burns; two walks left (x 94) the long jump takes
+# it and lands on (12,6) (scripts/try_skills.py: jump_right move_left_1 move_left_1 jump_right).
+LEVEL3 = ("....................", "####################", "####################", "####################",
+          "#.........*.........", "#...................", "##...F...F...FF....F", "####################")
+GUN = "collect:gem:c10:r4"
+
+
+def level3_at(x):
+    from dave_agent.schemas import PixelPos
+    first = obs(grid=LEVEL3, cols=(0, 19), level="level3", player=((x + 8) // 16, 6))
+    return first.model_copy(update={"player_position": PixelPos(x=x, y=96)})
+
+
+def test_an_item_taken_only_in_flight_has_take_offs():
+    r = reach(grid=LEVEL3)
+    takeoffs = r.grab_takeoffs((10, 4))
+    # The 4-tile jump from (6,6) and (7,6), landing past the vine (real game, from x 110: x 174).
+    assert takeoffs[(6, 6)][0] == (10, 6) and takeoffs[(7, 6)] == ((11, 6), (112, 1, 64))
+    assert (8, 6) not in takeoffs  # every jump right from the vine's edge burns
+    assert {(6, 6), (10, 6)} <= r.targets_for((10, 4))
+    assert r.grab_takeoffs((30, 4)) == {}  # unseen: nothing to take
+
+
+def test_off_grid_dave_is_led_to_the_take_off_then_told_the_jump_takes_it():
+    for x in (126, 110):  # where the real game puts him: not multiples of 16
+        first = level3_at(x)
+        gm, planner, mem, step = started([plan(GUN)], first=first)
+        candidates, catalog = offered(first)
+        notes = {c.skill: c.description for c in gm.annotate(first, candidates, catalog)[0]}
+        if x == 126:
+            assert (gm.goal.next_waypoint.col, gm.goal.next_waypoint.row) == (7, 6)  # the take-off, not the gun
+            assert [s for s, d in notes.items() if d.startswith("route:")] == ["move_left_1"]
+        else:  # one walk left: the 4- and 5-tile jumps take it
+            assert [s for s, d in notes.items() if d.startswith("route:")] == ["jump_right_4", "jump_right_5"]
+            assert notes["jump_right_4"].startswith("route: picks up the gem on the way")
+    first = level3_at(94)
+    gm, planner, mem, step = started([plan(GUN)], first=first)
+    candidates, catalog = offered(first)
+    notes = {c.skill: c.description for c in gm.annotate(first, candidates, catalog)[0]}
+    assert notes["jump_right"].startswith("route: picks up the gem on the way")
+    assert [s for s, d in notes.items() if d.startswith("route:")] == ["jump_right", "jump_right_4", "jump_right_5"]
+
+
+# Dave level 4 around the jetpack (columns 58-74 shifted to 0-16, as the bridge reports them; the
+# jetpack at (69,5) is the gem here). From (64,5) the way on is a fall off the platform's end onto
+# (65,6): one walk stops 4 px short of the edge, three walk on past (65,6) into the pit below, and
+# from x 104 a walk falls with the key still held and drifts past (65,6) too. The person let go
+# mid-fall: step_off_right.
+LEVEL4_JETPACK = (
+    ".................",
+    "#################",
+    ".................",
+    ".........F##F.#..",
+    "...###.###..#.#..",
+    "F...#......*#.#..",
+    "F#....#...###.#..",
+    "F#....##.##...#..",
+    "##..#............",
+    "....#......#..#..",
+    "#################",
+    ".................",
+)
+
+
+def test_a_fall_off_the_platform_end_is_led_by_the_walks_to_the_edge():
+    from dave_agent.schemas import PixelPos
+
+    def at(x):
+        o = obs(grid=LEVEL4_JETPACK, cols=(0, 16), level="level4", player=(6, 5))
+        return o.model_copy(update={"player_position": PixelPos(x=x, y=80)})
+
+    for x in (88, 104):  # 88: the real game's x 1016
+        first = at(x)
+        gm, planner, mem, step = started([plan("collect:gem:c11:r5")], first=first)
+        assert (gm.goal.next_waypoint.col, gm.goal.next_waypoint.row) == (7, 6)
+        candidates, catalog = offered(first)
+        notes = {c.skill: c.description for c in gm.annotate(first, candidates, catalog)[0]}
+        assert notes["step_off_right"].startswith("route: makes the next move (fall to [7, 6])"), x
+        assert not notes["move_right_3"].startswith("route:")  # walks on into the pit

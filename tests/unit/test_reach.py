@@ -4,7 +4,7 @@ route is the one verified on the real game with scripts/try_skills.py (docs/skil
 from pathlib import Path
 
 from dave_agent.config import load_config
-from dave_agent.control.reach import ReachMap, iter_jumps, next_waypoint
+from dave_agent.control.reach import ReachMap, frontier, iter_jumps, next_waypoint
 
 # Rows 0-10 of level 1 as the tactical grid shows them (row 9 = floor; T trophy, D door).
 LEVEL1 = [
@@ -70,3 +70,34 @@ def test_unknown_or_unreachable_target_gives_no_waypoint():
     m = reach()
     assert next_waypoint(m, (2, 9), (40, 9)) is None  # never observed
     assert next_waypoint(m, (2, 9), (2, 9)) == (2, 9)  # already there
+
+
+def test_frontier_falls_back_to_the_furthest_standable_cells():
+    """Level 3: the screen's last column is a fire pit, so no standable cell touches the explored
+    edge; exploring right then heads for the furthest standable cells, and walking there scrolls."""
+    rows = ["####", "#..X", "####"]
+    m = reach(rows)
+    assert frontier(m, 1) == {(2, 1)}
+    assert frontier(reach(["####", "#...", "####"]), 1) == {(3, 1)}
+
+
+def test_flying_stops_at_ceilings_and_routes_fly_only_with_fuel():
+    """dave.c jetpacking: 1 px a tick, the head test stops it under a brick, and the jetpack key
+    drops Dave to the floor. Routes fly only with fuel, and then also into a floating item."""
+    from dave_agent.config import SkillPhase, SkillSpec
+    from dave_agent.control.reach import trace_flying
+
+    rows = ["#####", "#...#", "#.#.#", "#.#.#", "#.#.#", "#####"]  # a wall 3 rows high: no jump clears it
+    up = SkillSpec(name="fly_up_3", kind="single", phases=(SkillPhase(buttons=("jump",), ticks=48),))
+    off = SkillSpec(name="jetpack_off", kind="single", phases=(SkillPhase(buttons=("jetpack",), ticks=1),))
+    m = reach(rows)
+    path = trace_flying(m, 16, 48, up)
+    assert path[-1] == (16, 14) and len(path) == 48  # stopped 2 px into the ceiling brick, as in the game
+    assert trace_flying(m, 16, 32, off)[-1] == (16, 64)  # off: falls to the floor
+    assert m.path((1, 4), {(3, 4)}) is None  # the wall between: no way without the jetpack
+    flying = ReachMap(m.cells, DAVE, fuel=900)
+    # Fly onto the wall's top, then drop off it: cheaper than flying all the way.
+    assert flying.path((1, 4), {(3, 4)}) == [((2, 1), "fly"), ((3, 4), "fall")]
+    assert flying.fly_path((1, 4), (3, 4)) == [(1, 4), (1, 3), (1, 2), (1, 1), (2, 1), (3, 1), (3, 2), (3, 3), (3, 4)]
+    assert (1, 2) in flying.targets_for((1, 2)) and (1, 2) not in m.targets_for((1, 2))  # in the air: flown into
+    assert ReachMap(m.cells, DAVE, fuel=40).path((1, 4), {(3, 4)}) is None  # 2 cells of fuel: too short

@@ -31,7 +31,7 @@ from dave_agent.schemas import (
 )
 
 BRIDGE_EXE = "deadly-dave-bridge.exe"
-BRIDGE_PROTOCOL = 1
+BRIDGE_PROTOCOL = 2
 TILE_PX = 16
 VIEW_COLS = 20  # 320 px scene
 TICK_SECONDS = 0.014  # game.c gameloop tick_interval
@@ -56,6 +56,25 @@ PICKUP_MODS = {3: "loot", 4: "trophy", 10: "gun", 11: "jetpack"}
 # dave.h DAVE_STATE_* and DAVE_DIRECTION_* (FRONTR/FRONTL fire like RIGHT/LEFT in game_do_bullets).
 PLAYER_STATES = ("standing", "walking", "jumping", "climbing", "freefalling", "jetpacking", "burning", "dead", "blinking")
 FACING = {0: "front", 1: "right", 2: "left", 3: "left", 4: "right"}
+
+MOTION_STEPS = 40  # route steps passed on per monster: 200 ticks ahead
+
+
+def _monster_motion(m: dict) -> dict | None:
+    """A monster's scripted motion from the bridge (protocol 2): its route rotated to start at the
+    next step, the step cooldown, the shot countdown and its live plasma."""
+    route = m.get("route")
+    if not route or m.get("state") != 1:  # MONSTER_STATE_ACTIVE: only active monsters move and shoot
+        return None
+    pairs = [route[i:i + 2] for i in range(0, len(route) - 1, 2)]
+    start = m["route_idx"] // 2 % len(pairs)
+    steps = [pairs[(start + k) % len(pairs)] for k in range(MOTION_STEPS)]
+    plasma = m.get("plasma")
+    return {"steps": steps, "cooldown": m["cooldown"], "shoot_in": m["ticks_before_shoot"],
+            "fire_rate": m["fire_rate"],
+            "plasma": None if plasma is None else {"x": plasma["x"], "y": plasma["y"], "dx": plasma["speed"],
+                                                   "dead": bool(plasma["dead"])}}
+
 
 # First sprite index of each monster's 4-frame animation (tile.h SPRITE_IDX_MONSTER_*).
 MONSTER_SPRITE_BASE = {89: "spider", 93: "swirl", 97: "sun", 101: "bones", 105: "ufo", 109: "guard"}
@@ -88,7 +107,7 @@ class DaveBridgeAdapter:
                 f"{exe} not found; run scripts\\setup_dave.bat to clone, patch and build deadly-dave"
             )
         self._exe = exe
-        self._build_id = f"deadly-dave-bridge-p{BRIDGE_PROTOCOL}-{_sha256(exe)[:12]}"
+        self._build_id = build_id(self._dir)
         self._timeout = timeout_seconds
         self._watch = watch
         self._watch_delay_ms = watch_delay_ms
@@ -305,6 +324,8 @@ class DaveBridgeAdapter:
             player_velocity_source="derived" if velocity is not None else None,
             grounded=bool(dave["grounded"]),
             player_state=PLAYER_STATES[dave["state"]],
+            jump_tick=dave["jump_state"] if PLAYER_STATES[dave["state"]] == "jumping" else None,
+            jump_cooldown=max(0, dave["jump_cooldown"]) if "jump_cooldown" in dave else None,
             facing=FACING[dave["face"]],
             lives=raw["lives"],
             inventory={
@@ -324,18 +345,20 @@ class DaveBridgeAdapter:
     def _entities(self, raw: dict, previous: dict | None, region: Region) -> list[Entity]:
         left = region.min.col * TILE_PX
         right = (region.max.col + 1) * TILE_PX
-        found: list[tuple[str, str, int, int]] = []
+        found: list[tuple[str, str, int, int, dict | None]] = []
         for m in raw["monsters"]:
+            plasma = m.get("plasma")
             if m["alive"]:
-                found.append((f"monster{m['idx']}", monster_type(m["sprite"]), m["x"], m["y"]))
-            if "plasma" in m:
-                found.append((f"plasma{m['idx']}", "plasma", m["plasma"]["x"], m["plasma"]["y"]))
+                found.append((f"monster{m['idx']}", monster_type(m["sprite"]), m["x"], m["y"], _monster_motion(m)))
+            if plasma is not None and not plasma.get("dead"):  # a dead plasma is gone next tick, never drawn
+                found.append((f"plasma{m['idx']}", "plasma", plasma["x"], plasma["y"],
+                               {"dx": plasma["speed"]} if "speed" in plasma else None))
         if raw["bullet"] is not None:
-            found.append(("bullet", "bullet", raw["bullet"]["x"], raw["bullet"]["y"]))
+            found.append(("bullet", "bullet", raw["bullet"]["x"], raw["bullet"]["y"], None))
 
         elapsed = raw["tick"] - previous["tick"] if previous is not None else 0
         entities, positions = [], {}
-        for entity_id, entity_type, x, y in found:
+        for entity_id, entity_type, x, y, motion in found:
             if not (left <= x < right):
                 continue  # off screen: never visible under local_observed
             positions[entity_id] = (x, y)
@@ -353,6 +376,7 @@ class DaveBridgeAdapter:
                     last_observed_frame=raw["tick"],
                     visible=True,
                     source="adapter",
+                    motion=motion,
                 )
             )
         self._prev_positions = positions
@@ -411,3 +435,21 @@ def _parse_level(scenario_id: str) -> int:
 
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def build_id(dave_dir: Path) -> str:
+    """The game build that learned graphs are tied to: a hash of the game's own sources and
+    level data (``*.c``, ``include/``, ``res/levels/``), leaving out the bridge. Rebuilding or
+    re-patching the bridge (it only reports state) keeps the id; changing the physics or the
+    levels changes it. Without sources (only the executable), the bridge executable's hash."""
+    dave_dir = Path(dave_dir)
+    files = [f for f in dave_dir.glob("*.c") if f.name != "bridge.c"]
+    files += [f for f in (dave_dir / "include").rglob("*") if f.is_file() and not f.name.startswith("bridge")]
+    files += [f for f in (dave_dir / "res" / "levels").rglob("*") if f.is_file()]
+    if not any(f.suffix == ".c" for f in files):
+        return f"deadly-dave-bridge-p{BRIDGE_PROTOCOL}-{_sha256(dave_dir / BRIDGE_EXE)[:12]}"
+    digest = hashlib.sha256()
+    for f in sorted(files, key=lambda f: f.relative_to(dave_dir).as_posix()):
+        digest.update(f.relative_to(dave_dir).as_posix().encode() + b"\0")
+        digest.update(f.read_bytes().replace(b"\r\n", b"\n") + b"\0")
+    return f"deadly-dave-{digest.hexdigest()[:12]}"

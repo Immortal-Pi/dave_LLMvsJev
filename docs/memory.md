@@ -53,8 +53,10 @@ Before every model decision (`control/experience.py`, called from `run_episode`)
 - **every arm:** `this episode from here: 2x, 2 died (burned), last end [3,9]` (working-memory experience for Dave's tile);
 - **graph-enabled arms:** `past runs from this platform: 5x, 3 ok, 2 fatal, lands row 7 cols 4-9` (`WorldGraph.skill_evidence`). It is read from a copy of the graph taken at episode start, so this episode is never counted twice. A frozen warm checkpoint gives the same notes in every trial.
 
+- **graph-enabled arms:** `past goals like this one from this platform: 3/4 reached (9/12 tries closer)`: the learned goal credit toward the active goal's target (below).
+
 Rules:
-- An untried skill is unchanged. Descriptions stay capped at 200 characters.
+- An untried skill is unchanged. Descriptions are capped at `DESCRIPTION_MAX` (320 characters, `schemas.py`; 200 before the credit notes).
 - Notes only inform: nothing is masked, and the controller still chooses.
 - The offered set and its digest are computed before the notes, so replay and parity checks are unaffected.
 - Mock controllers ignore descriptions, so the offline traces are unchanged.
@@ -62,6 +64,16 @@ Rules:
 Why: Jev answers the same request the same way. Without the notes, Dave returning to a tile after a respawn saw exactly the request that led to his death, and repeated the fatal move.
 
 Limits: the 120-frame window is fixture-scale. A Dave jump takes 94 frames, so on Dave the window holds only a few entries. Tune it with the planner (Phase 6).
+
+### Goal credit
+
+The learned graph scores a move a success when Dave lands alive on another platform, so a jump back and forth between two platforms looks perfect even when it leads nowhere. In a live level 3 run, `jump_right` c2→c6 showed 37/37 and the jump back 29/29, and the gun was never taken. Goal credit measures progress toward the goal instead (`control/credit.py`):
+
+- **Each skill is scored** after it runs (`GoalManager._credit_step`). It compares the reach estimate's remaining cost to the goal's target (`ReachMap.cost`; for explore goals, to the explored map's edge that way) from the standing cell where the skill started (working memory's newest entry) and from the cell where it ended. The result is `closer`, `farther`, a `loop` (back on a cell already visited while going for this target) or `died`. Skills started in the air and level changes are not scored.
+- **This episode, every arm:** `GoalCredit` keeps the counts per target and per (cell, skill). It survives respawns and is shown on the options as `for this goal from here: 6x, never closer, 5x back where Dave had already been`.
+- **Across runs, graph-enabled arms:** when a goal ends (achieved, failed, expired or replaced), its steps go to the learned graph in `PlanningStep.credit`. `run_episode` records them only while the graph is learning (`WorldGraph.record_credit`), so a frozen warm checkpoint is never changed. Each start platform gets `credit["<skill>|<target_ref>"] = {tries, closer, goals, reached}`. The past-run note above reads it, and the learned route search weighs moves with it (`docs/graph.md`).
+
+Notes and route costs only: nothing is masked, and Jev still chooses. The A, B and C requests stay identical apart from the graph arm's past-run notes and routes.
 
 ## Derived events (`EventDetector`)
 

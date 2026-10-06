@@ -2,7 +2,9 @@
 import { useEffect, useState } from "react";
 import { DecisionFeed } from "@/components/live/DecisionFeed";
 import { GameView } from "@/components/live/GameView";
+import { GraphPanel } from "@/components/live/GraphPanel";
 import { PlannerPanel } from "@/components/live/PlannerPanel";
+import { StatsPanel } from "@/components/live/StatsPanel";
 import { getStatus, LIVE_URL, startRun, stopRun, useLive, type ServerStatus } from "@/lib/live";
 
 const ARM_LABEL: Record<string, string> = { A: "A · LLM tactical", B: "B · Jev tactical", C: "C · Jev + learned graph" };
@@ -104,6 +106,8 @@ export default function LivePage() {
         <GameView live={live} />
         <DecisionFeed live={live} />
         <PlannerPanel live={live} />
+        <StatsPanel live={live} />
+        <GraphPanel live={live} />
       </div>
     </div>
   );

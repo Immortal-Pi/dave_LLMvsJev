@@ -18,6 +18,7 @@ from typing import Any
 
 import networkx as nx
 
+from dave_agent.control.credit import GoalSteps
 from dave_agent.control.skills import ExecutionResult
 from dave_agent.control.threats import contact_cause
 from dave_agent.memory.working import player_tile
@@ -161,6 +162,10 @@ class WorldGraph:
             self._add_failure_record(a["failed_attempts"], key, rec["attempts"], rec["fatal"], rec["evidence"])
         self._add_evidence(a, b["evidence"], b["evidence_count"])
         a["incidents"] = (a.get("incidents", []) + b.get("incidents", []))[-self.evidence_limit:]
+        for key, rec in b.get("credit", {}).items():
+            into = a.setdefault("credit", {}).setdefault(key, {"tries": 0, "closer": 0, "goals": 0, "reached": 0})
+            for field in into:
+                into[field] += rec.get(field, 0)
         for u, v, key, data in list(self.g.in_edges(other, keys=True, data=True)) + \
                 list(self.g.out_edges(other, keys=True, data=True)):
             u2, v2 = (keep if u == other else u), (keep if v == other else v)
@@ -202,10 +207,12 @@ class WorldGraph:
         return None
 
     # -- edges -------------------------------------------------------------
-    def record_execution(self, start: Observation, run: ExecutionResult, ref: str) -> str:
+    def record_execution(self, start: Observation, run: ExecutionResult, ref: str,
+                         predicted_safe: bool | None = None) -> str:
         """Update evidence from one executed skill. Returns what was recorded:
         success | stay | inconclusive | failure_edge | failure_node | unanchored | level_changed.
-        A fatal skill also leaves an incident (what touched Dave, and where) on its start node."""
+        A fatal skill also leaves an incident (what touched Dave, and where) on its start node,
+        marked ``predicted: safe`` when the threat screen had predicted no contact (a forecast miss)."""
         self.observe(start)
         if run.observation.level_id != start.level_id:
             return "level_changed"  # a transition between levels is never an edge of either graph
@@ -219,7 +226,7 @@ class WorldGraph:
         fatal = run.reason == "hazard_contact" or any(e.event_type == "death" for e in run.events)
         self._add_evidence(self.g.nodes[source], [ref], 1)
         if fatal:
-            self._add_incident(self.g.nodes[source], run, ref)
+            self._add_incident(self.g.nodes[source], run, ref, predicted_safe)
 
         if run.outcome == "completed":
             target = self.locate(run.observation)
@@ -294,6 +301,37 @@ class WorldGraph:
             rec["fatal"] += failed["fatal"]
         return out
 
+    def record_credit(self, goal: GoalSteps) -> int:
+        """Credit one ended goal's steps (control/credit.py) to the platforms they started from:
+        per ``skill|target_ref``, the tries and the ones that got closer, how many goals used it and
+        how many of those were achieved. Steps off any mapped platform are skipped. Returns how
+        many steps were credited."""
+        per: dict[tuple[str, str], list[int]] = {}
+        for (col, row), skill, closer in goal.steps:
+            node = next((n for c in (col, col - 1, col + 1) if (n := self.node_at(goal.level_id, row, c))), None)
+            if node is None:
+                continue
+            rec = per.setdefault((node, skill), [0, 0])
+            rec[0] += 1
+            rec[1] += int(closer)
+        for (node, skill), (tries, closer) in per.items():
+            credit = self.g.nodes[node].setdefault("credit", {})
+            entry = credit.setdefault(f"{skill}|{goal.target_ref}", {"tries": 0, "closer": 0, "goals": 0, "reached": 0})
+            entry["tries"] += tries
+            entry["closer"] += closer
+            entry["goals"] += 1
+            entry["reached"] += int(goal.reached)
+        return sum(t for t, _ in per.values())
+
+    def credit_evidence(self, obs: Observation, target_ref: str) -> dict[str, dict[str, int]]:
+        """Per skill, the past credit toward ``target_ref`` from the platform Dave stands on."""
+        node = self.locate(obs)
+        if node is None:
+            return {}
+        suffix = f"|{target_ref}"
+        return {key[:-len(suffix)]: dict(rec) for key, rec in self.g.nodes[node].get("credit", {}).items()
+                if key.endswith(suffix)}
+
     def suggest(self, level_id: str, col: int, row: int, source: str, rationale: str = "") -> None:
         """Record an exploration target proposed by a model or planner. Suggestions are
         never topology: they create no nodes or edges and route search ignores them."""
@@ -307,12 +345,16 @@ class WorldGraph:
         item["evidence"] = (item["evidence"] + [r for r in refs if r not in item["evidence"]])[-self.evidence_limit:]
         item["evidence_count"] += count
 
-    def _add_incident(self, node: dict[str, Any], run: ExecutionResult, ref: str) -> None:
+    def _add_incident(self, node: dict[str, Any], run: ExecutionResult, ref: str,
+                      predicted_safe: bool | None = None) -> None:
         """What touched Dave on the first burning frame of a fatal skill, and where."""
         hit = next((s.observation for s in run.steps if s.observation.player_state == "burning"), run.observation)
         cause, tile = contact_cause(hit)
         incidents = node.setdefault("incidents", [])
-        incidents.append({"skill": run.skill, "cause": cause, "tile": tile, "ref": ref})
+        incident = {"skill": run.skill, "cause": cause, "tile": tile, "ref": ref}
+        if predicted_safe:
+            incident["predicted"] = "safe"
+        incidents.append(incident)
         del incidents[:-self.evidence_limit]
 
     def _add_failure_record(self, records: dict, key: str, attempts: int, fatal: int, refs: list[str]) -> None:
@@ -344,6 +386,26 @@ class WorldGraph:
             "unanchored": self.unanchored,
             "suggestions": len(self.suggestions),
         }
+
+    def view(self) -> dict[str, Any]:
+        """A JSON-ready snapshot for the live viewer (runner/live.py). Reads only."""
+        nodes = [{"id": n, "row": d["row"], "col_min": d["col_min"], "col_max": d["col_max"],
+                  "visited": d["visited"], "open_left": d["open_left"], "open_right": d["open_right"],
+                  "items": [{"kind": i["kind"], "col": i["col"]} for i in d["items"]],
+                  "stays": d["stays"], "inconclusive": d["inconclusive"],
+                  "failed": sum(r["attempts"] for r in d["failed_attempts"].values()),
+                  "incidents": [{"cause": i.get("cause"), "tile": i.get("tile"), "skill": i.get("skill")}
+                                for i in d.get("incidents", [])],
+                  "credit": d.get("credit", {})}
+                 for n, d in self.g.nodes(data=True)]
+        edges = [{"source": u, "target": v, "key": k, "skill": e["skill"],
+                  "inventory_context": list(e["inventory_context"]), "attempts": e["attempts"],
+                  "successes": e["successes"], "failures": e["failures"], "fatal": e["fatal"],
+                  "p": round(success_probability(e), 3), "frames": round(expected_frames(e), 1),
+                  "last_outcome": e["last_outcome"]}
+                 for u, v, k, e in self.g.edges(keys=True, data=True)]
+        return {"level_id": self.level_id, "topology_version": self.topology_version, "counts": self.counts(),
+                "nodes": nodes, "edges": edges}
 
 
 def success_probability(edge: dict[str, Any]) -> float:
@@ -377,14 +439,22 @@ class GraphStore:
     def observe(self, obs: Observation) -> None:
         self.for_level(obs.level_id).observe(obs)
 
-    def record_execution(self, start: Observation, run: ExecutionResult, ref: str) -> str:
+    def record_execution(self, start: Observation, run: ExecutionResult, ref: str,
+                         predicted_safe: bool | None = None) -> str:
         if run.observation.level_id != start.level_id:
             self.observe(run.observation)  # the new level's first view, in its own graph
-        return self.for_level(start.level_id).record_execution(start, run, ref)
+        return self.for_level(start.level_id).record_execution(start, run, ref, predicted_safe)
 
     def skill_evidence(self, obs: Observation) -> dict[str, dict[str, Any]]:
         graph = self.get(obs.level_id)
         return {} if graph is None else graph.skill_evidence(obs)
+
+    def record_credit(self, goal: GoalSteps) -> int:
+        return self.for_level(goal.level_id).record_credit(goal)
+
+    def credit_evidence(self, obs: Observation, target_ref: str) -> dict[str, dict[str, int]]:
+        graph = self.get(obs.level_id)
+        return {} if graph is None else graph.credit_evidence(obs, target_ref)
 
     def add_lineage(self, run_id: str, episode_key: str, arm: str, scenario_id: str) -> None:
         for graph in self.levels.values():

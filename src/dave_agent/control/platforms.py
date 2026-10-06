@@ -178,6 +178,12 @@ class Platforms:
             kinds = ", ".join(sorted(set(causes)))
             self.items[pid].danger.append(f"{label} {len(causes)}x ({kinds})")
 
+    def note_fire(self, cells: set[Cell]) -> None:
+        """``in the line of fire`` on the platforms a predicted shot crosses."""
+        for p in self.items.values():
+            if any(c in cells for c in p.cells()):
+                p.danger.append("in the line of fire of a monster's shots")
+
     def note_failed(self, links: list[dict[str, Any]]) -> None:
         for link in links:
             p, q = self.by_cell.get(tuple(link["from"])), self.by_cell.get(tuple(link["to"]))

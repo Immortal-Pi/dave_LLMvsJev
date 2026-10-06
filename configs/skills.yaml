@@ -21,8 +21,12 @@ skills:
   # arc_px = rise above the start by tick after Up (flat-floor jump, lands at tick 94); air
   # control and free fall are 1 px/tick; the short jumps hold the direction for 32 ticks.
   # Offsets from Dave's x: walking right off a ledge ending at px 127 he falls at x 124 and a
-  # rightward jump lands on a ledge starting at px 64 at x 56 (feet at +4 and +8); walking into
-  # a wall at px 176 he stops at x 164 (body right edge +11, left edge assumed symmetric, +4).
+  # rightward jump lands on a ledge starting at px 64 at x 56. Ground is tested at x+4 .. x+9
+  # (dave.c dave_on_ground; +8 was measured first, and Dave standing at x 359 on a brick from
+  # px 368 on level 4 was taken for falling, so no threat was screened there); walking into
+  # a wall at px 176 he stops at x 164 (body right edge +11). The left edge is +2: dave.c tests
+  # x+1 before each 1 px step left, so against a brick ending at px 15 he stops at x 14.
+  # A jump starts one still tick after Up (more after a landing: reach.takeoff_delay).
   reach:
     dave:
       arc_px: [0, 1, 1, 3, 3, 6, 6, 8, 8, 10, 10, 12, 12, 14, 14, 16, 16, 18, 18, 20, 20, 22, 22, 23, 23, 25, 25, 26, 26, 27, 27, 28, 28, 29, 29, 30, 30, 31, 31, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 31, 31, 30, 30, 29, 29, 28, 28, 27, 27, 26, 26, 25, 25, 23, 23, 21, 21, 19, 19, 17, 17, 15, 15, 13, 13, 11, 11, 9, 9, 7, 7, 5, 5, 2, 2, 0, 0]
@@ -30,8 +34,12 @@ skills:
       walk_px_per_3_ticks: 2
       fall_px_per_tick: 1
       short_hold_ticks: 32
-      body_px: [4, 11]
-      foot_px: [4, 8]
+      # The 4- and 5-tile jumps (jump_*_4, jump_*_5). Human play on level 3 crossed its row of
+      # pillars with holds of 58-86 ticks; 64 and 80 land within 8 px of 23 of those 25 jumps,
+      # where the long jump overshoots into the fire and the short one falls short.
+      mid_hold_ticks: [64, 80]
+      body_px: [2, 11]
+      foot_px: [4, 9]
       head_px: [4, 9]  # dave.c dave_collision_top: (x+4, y+1) and (x+9, y+1)
 
   catalogs:
@@ -49,27 +57,47 @@ skills:
       - name: move_left_1
         kind: single
         description: walk left about 1 tile
-        preconditions: [alive]
+        preconditions: [alive, not_jetpacking]
         phases: [{buttons: [left], ticks: 24}]
-        interrupt_on: [death, terminal, hazard_contact, new_hazard_nearby, threat_incoming]
+        interrupt_on: [death, terminal, hazard_contact, new_hazard_nearby, threat_incoming, threat_sighted]
       - name: move_right_1
         kind: single
         description: walk right about 1 tile
-        preconditions: [alive]
+        preconditions: [alive, not_jetpacking]
         phases: [{buttons: [right], ticks: 24}]
-        interrupt_on: [death, terminal, hazard_contact, new_hazard_nearby, threat_incoming]
+        interrupt_on: [death, terminal, hazard_contact, new_hazard_nearby, threat_incoming, threat_sighted]
       - name: move_left_3
         kind: single
         description: walk left about 3 tiles
-        preconditions: [alive]
+        preconditions: [alive, not_jetpacking]
         phases: [{buttons: [left], ticks: 72}]
-        interrupt_on: [death, terminal, hazard_contact, new_hazard_nearby, threat_incoming]
+        interrupt_on: [death, terminal, hazard_contact, new_hazard_nearby, threat_incoming, threat_sighted]
       - name: move_right_3
         kind: single
         description: walk right about 3 tiles
-        preconditions: [alive]
+        preconditions: [alive, not_jetpacking]
         phases: [{buttons: [right], ticks: 72}]
-        interrupt_on: [death, terminal, hazard_contact, new_hazard_nearby, threat_incoming]
+        interrupt_on: [death, terminal, hazard_contact, new_hazard_nearby, threat_incoming, threat_sighted]
+
+      # Step off: walk to the platform's end, then let go, so Dave drops straight down onto what
+      # is below (a walk that keeps the key held drifts on: level 4, (64,5) to (65,6), where the
+      # person let go mid-fall and the walks overshot into the pit).
+      - name: step_off_left
+        kind: macro
+        description: walk left off the platform's end and drop straight down
+        preconditions: [on_ground]
+        phases:
+          - {buttons: [left], until: airborne, max_ticks: 72}
+          - {buttons: [], until: landed, max_ticks: 200}
+        interrupt_on: [death, terminal, hazard_contact, new_hazard_nearby, threat_sighted]
+      - name: step_off_right
+        kind: macro
+        description: walk right off the platform's end and drop straight down
+        preconditions: [on_ground]
+        phases:
+          - {buttons: [right], until: airborne, max_ticks: 72}
+          - {buttons: [], until: landed, max_ticks: 200}
+        interrupt_on: [death, terminal, hazard_contact, new_hazard_nearby, threat_sighted]
 
       # A jump starts when Up is pressed on the ground and the hidden landing cooldown
       # (5 ticks) has expired. Up is released as soon as the jump starts, because holding
@@ -85,7 +113,7 @@ skills:
         phases:
           - {buttons: [jump], until: jumping, max_ticks: 6}
           - {buttons: [], until: landed, max_ticks: 200}
-        interrupt_on: [death, terminal, hazard_contact, new_hazard_nearby]
+        interrupt_on: [death, terminal, hazard_contact, new_hazard_nearby, threat_sighted]
       - name: jump_left
         kind: macro
         description: long jump left (about 6 tiles on flat ground) and land
@@ -93,7 +121,7 @@ skills:
         phases:
           - {buttons: [jump], until: jumping, max_ticks: 6}
           - {buttons: [left], until: landed, max_ticks: 200}
-        interrupt_on: [death, terminal, hazard_contact, new_hazard_nearby]
+        interrupt_on: [death, terminal, hazard_contact, new_hazard_nearby, threat_sighted]
       - name: jump_right
         kind: macro
         description: long jump right (about 6 tiles on flat ground) and land
@@ -101,7 +129,7 @@ skills:
         phases:
           - {buttons: [jump], until: jumping, max_ticks: 6}
           - {buttons: [right], until: landed, max_ticks: 200}
-        interrupt_on: [death, terminal, hazard_contact, new_hazard_nearby]
+        interrupt_on: [death, terminal, hazard_contact, new_hazard_nearby, threat_sighted]
       - name: jump_left_short
         kind: macro
         description: jump left about 2 tiles, then drop straight down
@@ -110,7 +138,7 @@ skills:
           - {buttons: [jump], until: jumping, max_ticks: 6}
           - {buttons: [left], ticks: 32}
           - {buttons: [], until: landed, max_ticks: 200}
-        interrupt_on: [death, terminal, hazard_contact, new_hazard_nearby]
+        interrupt_on: [death, terminal, hazard_contact, new_hazard_nearby, threat_sighted]
       - name: jump_right_short
         kind: macro
         description: jump right about 2 tiles, then drop straight down
@@ -119,13 +147,140 @@ skills:
           - {buttons: [jump], until: jumping, max_ticks: 6}
           - {buttons: [right], ticks: 32}
           - {buttons: [], until: landed, max_ticks: 200}
-        interrupt_on: [death, terminal, hazard_contact, new_hazard_nearby]
+        interrupt_on: [death, terminal, hazard_contact, new_hazard_nearby, threat_sighted]
+
+      - name: jump_left_4
+        kind: macro
+        description: jump left about 4 tiles, then drop straight down
+        preconditions: [on_ground]
+        phases:
+          - {buttons: [jump], until: jumping, max_ticks: 6}
+          - {buttons: [left], ticks: 64}
+          - {buttons: [], until: landed, max_ticks: 200}
+        interrupt_on: [death, terminal, hazard_contact, new_hazard_nearby, threat_sighted]
+      - name: jump_right_4
+        kind: macro
+        description: jump right about 4 tiles, then drop straight down
+        preconditions: [on_ground]
+        phases:
+          - {buttons: [jump], until: jumping, max_ticks: 6}
+          - {buttons: [right], ticks: 64}
+          - {buttons: [], until: landed, max_ticks: 200}
+        interrupt_on: [death, terminal, hazard_contact, new_hazard_nearby, threat_sighted]
+      - name: jump_left_5
+        kind: macro
+        description: jump left about 5 tiles, then drop straight down
+        preconditions: [on_ground]
+        phases:
+          - {buttons: [jump], until: jumping, max_ticks: 6}
+          - {buttons: [left], ticks: 80}
+          - {buttons: [], until: landed, max_ticks: 200}
+        interrupt_on: [death, terminal, hazard_contact, new_hazard_nearby, threat_sighted]
+      - name: jump_right_5
+        kind: macro
+        description: jump right about 5 tiles, then drop straight down
+        preconditions: [on_ground]
+        phases:
+          - {buttons: [jump], until: jumping, max_ticks: 6}
+          - {buttons: [right], ticks: 80}
+          - {buttons: [], until: landed, max_ticks: 200}
+        interrupt_on: [death, terminal, hazard_contact, new_hazard_nearby, threat_sighted]
+
+      # The jetpack (dave.c dave_state_jetpacking_routine): the jetpack key turns it on (from
+      # standing, walking, jumping or falling, with fuel) and off (Dave then falls). On, Dave
+      # hovers and moves 1 px a tick along one axis (left, right, up = the jump key, down; down
+      # stops on the floor); every tick burns one bar of fuel (900 a pickup), moving or not.
+      # The key is a key-down event, applied on the first tick only.
+      - name: jetpack_on
+        kind: single
+        description: turn the jetpack on (Dave hovers; every tick burns one bar of fuel)
+        preconditions: [alive, has_fuel, not_jetpacking, screen_still]
+        phases: [{buttons: [jetpack], ticks: 1}]
+        interrupt_on: [death, terminal]
+      - name: jetpack_off
+        kind: single
+        description: turn the jetpack off (Dave falls to the ground below)
+        preconditions: [jetpacking, screen_still]
+        phases: [{buttons: [jetpack], ticks: 1}]
+        interrupt_on: [death, terminal]
+      - name: fly_up_1
+        kind: single
+        description: fly up 1 tile with the jetpack
+        preconditions: [jetpacking]
+        phases: [{buttons: [jump], ticks: 16}]
+        interrupt_on: [death, terminal, hazard_contact, new_hazard_nearby, threat_sighted]
+      - name: fly_down_1
+        kind: single
+        description: fly down 1 tile with the jetpack
+        preconditions: [jetpacking]
+        phases: [{buttons: [down], ticks: 16}]
+        interrupt_on: [death, terminal, hazard_contact, new_hazard_nearby, threat_sighted]
+      - name: fly_left_1
+        kind: single
+        description: fly left 1 tile with the jetpack
+        preconditions: [jetpacking]
+        phases: [{buttons: [left], ticks: 16}]
+        interrupt_on: [death, terminal, hazard_contact, new_hazard_nearby, threat_sighted]
+      - name: fly_right_1
+        kind: single
+        description: fly right 1 tile with the jetpack
+        preconditions: [jetpacking]
+        phases: [{buttons: [right], ticks: 16}]
+        interrupt_on: [death, terminal, hazard_contact, new_hazard_nearby, threat_sighted]
+      - name: fly_up_3
+        kind: single
+        description: fly up 3 tiles with the jetpack
+        preconditions: [jetpacking]
+        phases: [{buttons: [jump], ticks: 48}]
+        interrupt_on: [death, terminal, hazard_contact, new_hazard_nearby, threat_sighted]
+      - name: fly_down_3
+        kind: single
+        description: fly down 3 tiles with the jetpack
+        preconditions: [jetpacking]
+        phases: [{buttons: [down], ticks: 48}]
+        interrupt_on: [death, terminal, hazard_contact, new_hazard_nearby, threat_sighted]
+      - name: fly_left_3
+        kind: single
+        description: fly left 3 tiles with the jetpack
+        preconditions: [jetpacking]
+        phases: [{buttons: [left], ticks: 48}]
+        interrupt_on: [death, terminal, hazard_contact, new_hazard_nearby, threat_sighted]
+      - name: fly_right_3
+        kind: single
+        description: fly right 3 tiles with the jetpack
+        preconditions: [jetpacking]
+        phases: [{buttons: [right], ticks: 48}]
+        interrupt_on: [death, terminal, hazard_contact, new_hazard_nearby, threat_sighted]
+      - name: fly_up_nudge
+        kind: single
+        description: fly up 2 px with the jetpack (to line up with a gap)
+        preconditions: [jetpacking]
+        phases: [{buttons: [jump], ticks: 2}]
+        interrupt_on: [death, terminal, hazard_contact]
+      - name: fly_down_nudge
+        kind: single
+        description: fly down 2 px with the jetpack (to line up with a gap)
+        preconditions: [jetpacking]
+        phases: [{buttons: [down], ticks: 2}]
+        interrupt_on: [death, terminal, hazard_contact]
+      - name: fly_left_nudge
+        kind: single
+        description: fly left 2 px with the jetpack (to line up with a gap)
+        preconditions: [jetpacking]
+        phases: [{buttons: [left], ticks: 2}]
+        interrupt_on: [death, terminal, hazard_contact]
+      - name: fly_right_nudge
+        kind: single
+        description: fly right 2 px with the jetpack (to line up with a gap)
+        preconditions: [jetpacking]
+        phases: [{buttons: [right], ticks: 2}]
+        interrupt_on: [death, terminal, hazard_contact]
 
       # One bullet at a time; it spawns 8 px ahead in the facing direction and moves 2 px/tick.
       - name: shoot
         kind: single
-        description: fire the gun in the facing direction
-        preconditions: [alive, has_gun, facing_side, no_bullet]
+        description: fire the gun in the facing direction (bullets are unlimited, one on screen at a time)
+        preconditions: [alive, has_gun, facing_side, no_bullet, screen_still]
         phases: [{buttons: [fire], ticks: 1}]
         interrupt_on: [death, terminal]
 
@@ -135,6 +290,13 @@ skills:
         description: release all keys for 6 ticks (covers the landing cooldown)
         preconditions: [alive]
         phases: [{buttons: [], ticks: 6}]
+        interrupt_on: [death, terminal, hazard_contact, new_hazard_nearby, threat_incoming]
+      # The shortest wait, to start a move in a short safe moment between a monster's shots.
+      - name: wait_tick
+        kind: single
+        description: release all keys for 2 ticks
+        preconditions: [alive]
+        phases: [{buttons: [], ticks: 2}]
         interrupt_on: [death, terminal, hazard_contact, new_hazard_nearby, threat_incoming]
       - name: wait_long
         kind: single

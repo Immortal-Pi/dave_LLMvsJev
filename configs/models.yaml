@@ -8,13 +8,16 @@ models:
     # Azure reports no cost. Fill in your deployment's prices to get *estimated* costs and a
     # working paid-run ceiling, e.g. {input_per_mtok: 0.0, output_per_mtok: 0.0, source: "<price page URL>",
     # as_of: "YYYY-MM-DD"}. null: cost unknown (a live benchmark then needs --allow-unpriced).
-    price: null
+    # gpt-6-sol standard rate (Azure's own price page still listed it as "in processing").
+    price: {input_per_mtok: 2.0, output_per_mtok: 10.0, source: "https://openrouter.ai/openai/gpt-6-sol",
+            as_of: "2026-10-04"}
   tactical_llm:
     provider: azure_openai
     deployment_env: AZURE_OPENAI_CHAT_DEPLOYMENT
     max_completion_tokens: 2000
     reasoning_effort: low
-    price: null                   # see planner.price
+    price: {input_per_mtok: 2.0, output_per_mtok: 10.0, source: "https://openrouter.ai/openai/gpt-6-sol",
+            as_of: "2026-10-04"}   # see planner.price
   jev:
     provider: openrouter_decisions
     endpoint: https://openrouter.ai/api/alpha/decisions

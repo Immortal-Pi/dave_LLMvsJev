@@ -351,6 +351,19 @@ Watching level 2 live showed the Azure planner sending Dave through brick pillar
 
 Checks: `tests/unit/test_platforms.py` (11); 297 tests pass; mock runs on levels 2 and 3 (18,000 frames, 0 deaths; the mock tactical model chooses at random, so its score says nothing about planning); the `/live` page checked in headless Chrome. Not run: a paid Azure planner run with the new request.
 
+## Shots, mid-jump and take-offs (2026-10-04)
+
+Live level 3 and level 4 runs: Dave stuck between two vine clumps, the threat line drawn through walls, and the level 4 swirl's shots killing Dave.
+- **Monsters and shots predicted exactly:** bridge protocol 2 exports each monster's route, step cooldown and shot countdown; `control/threats.py` replays monster.c, including the shots not fired yet. Real game: exact over 120 ticks on level 4. The viewer draws routes (through walls, as the game moves them) and shots (stopping at walls).
+- **Mid-jump decisions are screened:** the observation's `jump_tick` gives the rest of the arc; a walk chosen in the air keeps walking after landing.
+- **Take-off search** up to 3 walks deep (level 3's vine tunnel), and route notes skip skills the screen removes.
+- **Line of fire** on platforms for the planner, and as extra cost in the reach estimate.
+- **Jump trajectories** on the map are the simulated flights.
+
+Route follower on the real game (rule planner): levels 1 and 2 still complete with no deaths; level 3 deaths 4 -> 1; level 4: 2 deaths in 18,000 frames under the swirl. 305 tests pass.
+
+**Rebuilt bridge (resolved):** the build id used to include the bridge executable's hash, so arm C's learned graphs (`artifacts/graphs/arm-C/dave/`) were refused after the rebuild, although the physics did not change. The build id now hashes the game's sources and levels only (`docs/graph.md`), and the arm C store was re-keyed with `dave-agent graph --rekey dave` (backups: `*.json.prekey`; 5 levels, 123 edges kept).
+
 ## Jev follows the plan (2026-10-04)
 
 Live Azure + Jev on level 2 made good plans that Jev did not carry out: after waypoint (34,4) Jev was told "heading to (47,2)" (the next planner waypoint, 12 columns right) and walked off the ledge.
@@ -360,6 +373,113 @@ Live Azure + Jev on level 2 made good plans that Jev did not carry out: after wa
 - **Failed moves** are only estimated moves (no more lines from Dave to off-map targets) and are cleared once made.
 
 Checks: 300 tests pass. A scripted controller that always takes the `route:` option, with the rule planner, completes level 1 and level 2 on the real game with no deaths (level 3: gun, no trophy in 18,000 frames). Not run: a paid live Jev run with the notes.
+
+## Live graph and run stats (2026-10-04)
+
+The `/live` page gains two sections below the planner (`docs/live.md`):
+- **Run stats** (`StatsPanel`): tactical decisions by Jev or the LLM, forced and fallback; planner calls; latency, tokens and cost per role; skill outcomes.
+- **Learned graph** (`GraphPanel`, arm C): the level's platforms and learned moves, updated after every skill from a new `graph` event (`WorldGraph.view()`, read-only; emitted only when a viewer is attached). The hub keeps only the newest snapshot.
+- Call views now carry `tokens`.
+
+Checks: `test_live.py` (graph events once at start and per skill, none without a graph, hub keeps the newest), `test_graph_store.py` (`view()` reads only, matches `counts()`); `npm run lint`, `tsc`, `build`; level 2 arm C mock run checked in headless Chrome (45 edges, 606 attempts on the stored graph).
+
+## The jetpack (2026-10-04)
+
+Human play reached level 4's trophy and door, and level 3's door, only with the jetpack; the catalog had no jetpack skill. Added (`docs/skills.md`, `docs/planner.md`):
+- `jetpack_on`, `jetpack_off`, `fly_<up|down|left|right>_<1|3>` and 2 px `fly_*_nudge` skills; walks need `not_jetpacking`;
+- `reach.trace_flying` (dave.c rules), used by the threat screen while flying;
+- flights in the reach estimate with the fuel Dave has, floating items as flight targets, and route notes for each step of a flight.
+
+Found on the way: the route notes' take-off search took `fly_up_*` (up is the jump key) for jumps, and Dave paced between two walks on level 2. Only on-ground skills count there now.
+
+Checks:
+- `uv run pytest`: 326 passed, 1 skipped.
+- Real game, `trace_flying` against the game tick by tick from level 3's jetpack: exact, including ceiling and wall stops.
+- `follow_route.py`: level 3 **completes** (11924 frames, 3 deaths, 711 fuel left): it takes the jetpack and flies to the door. Level 1 completes in 478 frames, level 2 in 3934, no deaths.
+- Level 4 (18000 frames): column 57, 1 death, the furthest any run got (paid run 2 reached 31). It did not reach the jetpack at (68,5) in time; the rule planner spent many goals on the trophy at (6,2), reachable only by flight.
+- Not done: a walk loop between two take-off walks still shows on level 3 at (63,4)-(64,4) before the trophy (it ends after 8 walks).
+
+## Shooting mid-air (2026-10-04)
+
+The person shot level 3's spider from the air; the agent could not decide in the air at all. Added (`docs/skills.md`):
+- the `threat_sighted` interrupt on walks and jumps: a monster or plasma coming into view anywhere stops the skill, mid-air included;
+- mid-air options with landing tiles, shot notes and a `route:` note on the best landing (`GoalManager._air_notes`);
+- a predicted kill counts: `shoot` is judged without the monster its bullet hits (no more shots from it);
+- `shoot` description says bullets are unlimited.
+
+Found on the way, both from the screen scroll freezing the game for 16 ticks (game.c):
+- fixed-tick holds counted the frozen ticks, so `jump_right_5` across the screen edge let go early and dropped into the fire (2 of the 4 deaths). Frozen ticks no longer count (`ExecutionResult.frozen_ticks`);
+- shots pressed during the scroll fired nothing: `shoot` needs `screen_still`.
+- Route jumps whose flight enters an unseen cell are left out (`ReachMap.known_flight`): the long jump from (29,6) was simulated bouncing off the screen's edge and flew on into the fire.
+
+Checks:
+- `uv run pytest`: 326 passed, 1 skipped. The swirl forecast test walks with `threat_sighted` off (it checks the forecast, not interrupts).
+- `follow_route.py --scenario level3 --frames 18000` (now also taking a shot whose note says it hits): before these changes it reached (29,6) and lost all 4 lives by frame 9742. Now it shoots mid-air, crosses all the pillars, takes the trophy at (67,9) and the jetpack at (66,9), and ends below the door at (69,2) with 1 life left (3 deaths, 2750 points). The door needs the jetpack, as in the person's run.
+- Remaining deaths: a threat sighted mid-jump where every option is predicted to be hit (the scripted follower then takes the latest; a tactical model has the notes), and one shot that passed the spider (not checked yet).
+
+## Human play and the 4- and 5-tile jumps (2026-10-04)
+
+`scripts/record_play.py` records a person playing (keys per tick); `scripts/compare_play.py` replays the log and compares each move with the catalog (`docs/skills.md`, "Comparing with human play"). The person completed levels 3, 4 and 5 (logs in `artifacts/human/`). What the agent lacks, by level:
+- **Level 3:** 25 of 32 jumps were 4-5 tiles (direction held 58-86 ticks, then dropped). The catalog had 2 and 6 tiles: from many pillars every forward jump was masked (the long one lands in the next fire pit). **Added** `jump_left/right_4` and `_5`. The person also fired during 7 jumps, shooting the spider ahead.
+- **Level 4:** the trophy at (5,2) and the door at (97,2) were reached with the jetpack (picked up at (68,5)). The catalog has no jetpack skill, so level 4 cannot be completed; the planner's repeated `collect:trophy:c6:r2` goals expired for that reason. The ledge at (31,3) was passed by walking off its end to (32,6) and `jump_right` to (35,4): catalog moves.
+- **Level 5:** the trophy at (46,2) was reached by climbing trees (516 ticks climbing; no climb skill), two gaps by jetpack, and 7 shots fired in the air.
+- **All:** 7 + 3 + 1 mid-air reversals (one, on level 5 at (66,3), avoided a hazard every catalog jump lands in); many walks under 1 tile and waits of 12-47 ticks.
+- The threat screen masks the exact jumps the person died on at the level 4 swirl (shot at 22 and 27 ticks).
+
+Also fixed: `frontier` was empty when the explored edge is a fire pit, so `explore:right` gave no route on level 3 (`docs/planner.md`).
+
+Checks:
+- `uv run pytest`: 326 passed, 1 skipped. Route tests updated where a 4- or 5-tile jump is now the cheaper move.
+- `follow_route.py`: level 2 completes in 3793 frames (6549), no deaths, the trophy taken in flight by `jump_right_5`. Level 3 takes the gun with `jump_right_4` then `jump_right`, crosses the screen edge, and reaches (29,6), using the new jumps along the pillars. It dies 3 times, each in a jump across the screen edge into the spider's plasma: the spider is unseen until the screen scrolls, mid-flight. The person died there too and then shot it from the air. `audit_threats.py`: `jump_right_4` from x 110 lands at x 174 as predicted.
+
+Next: the jetpack (needed for level 4), climbing (level 5), decisions in the air (shooting, reversals).
+
+## Level 4 timing and the screen edge (2026-10-04)
+
+In live arm C run `live-20261004T183734-4fd083` (level 4), Dave died 3 times, each by the swirl's shots, and for decisions 236-311 he paced at x 490-506 on the ledge at (31,3) while the screen did not scroll. Every death was logged as `cause: unknown`.
+
+The causes, found by replaying the recorded states and running the real game (`scripts/audit_threats.py`):
+- **The predicted paths were off.** A jump was predicted one tick early, and up to five ticks after a landing (the game's jump cooldown, now `Observation.jump_cooldown` from the bridge). In the air the model moved Dave 1 px every tick; the game moves him 2 px every other tick. The wall test used Dave's whole body; the game tests only the leading edge. Ground was tested at x+4..x+8; the game uses x+4..x+9. Head bumps and walks were also timed differently. All now follow dave.c (`docs/skills.md`). Along the recorded path, Dave is now within 1-2 px and the swirl and its shots match exactly.
+- **A dodge was cut short.** `new_hazard_nearby` stopped a jump chosen to dodge the swirl's next shot when that shot appeared. Predicted shots no longer interrupt.
+- **Landing in a trap went unseen.** A move counted as safe if its own path was, even when it landed where the next shot hit before Dave could move, or where every next move was hit. Plasma is now checked 16 ticks past the landing, scripted monsters over the whole path, and a landing with no safe next move is a `trap` contact.
+- **Waiting was never a plan.** A wait was judged by standing still for 48 ticks. Now it is safe when a move is safe after it, and the notes say when to go: `timing: go now, unsafe if started 18 or more ticks later`, `timing: standing is safe for 31 ticks; then safe: jump_left; later: jump_right from 24 ticks`.
+- **The screen edge.** The game scrolls only past x 520 there, and Dave can stand no further than x 507. Unseen cells were treated as walls, so every move right was simulated bouncing into the fire below and masked. Now unseen cells are unknown: such moves are noted (`passes the screen edge ...`), not masked, and on an explore goal with no known way on they are marked `route: reveals the map to the right`.
+- **Also:** `shoot` notes say whether the bullet hits (level 4 has no gun), and deaths by a monster's plasma are logged as `plasma`.
+
+Checks:
+- `uv run pytest`: 324 passed, 1 skipped.
+- The recorded states: the fatal choices before each death (`jump_left` at frames 1814 and 3864, `jump_right_short` at 5446) are now masked. On the ledge, the moves right are offered with the screen-edge note.
+- Real game, level 4, a controller that only takes what the screen keeps (`ledge.py` in the session scratchpad, not kept): 8 runs of 400 decisions around the swirl, 0 deaths (the recorded run had 3 there). It did not climb to the ledge; choosing the moment from the timing notes is the tactical model's job.
+- `follow_route.py`: level 1 completes in 470 frames, level 2 in 6549 frames (it was 6941), level 3 takes the gun; no deaths. Level 2 first stalled at the right screen edge because the edge note came before the `route:` note; the route note now leads.
+- The bridge prints `jump_cooldown`; the build id hashes the game sources and levels, not the bridge, so learned graphs stay valid.
+
+Paid run (arm B, Jev tactical, rule planner, store outside `artifacts/`): 391 decisions, 12737 frames, **0 deaths** (the recorded run: 3 deaths in 14848 frames), $0.04, stopped by the 1M-token budget. Dave got no further than (26,3): the rule planner cycled between the loot at (27,5) and (29,2) for most of the run, and Jev spent it timing moves around the swirl.
+
+Paid run 2 (`paid-l4-live`: arm B, Azure planner and Jev, token caps raised in a scratch config): 18011 frames (the episode limit), 477 decisions, **1 death**, Jev $0.05 (Azure cost not priced). Furthest point (31,6), under the ledge; the screen never scrolled. The planner chose loot goals for almost the whole run, and most expired on their deadline before the next was set; explore:right was set only twice.
+- The death: a `jump_left` predicted safe was hit 48 ticks in by a shot the model did not foresee. The swirl's previous shot was flying right, off the screen, into the unseen wall at column 35; it died there and the next one came at Dave about 40 ticks early. Shots are now forecast both ways (`docs/skills.md`); the move reads `danger: the next shot hits in 46 ticks` and is masked. The death was logged `unknown` because the shot that hits Dave is gone on his first burning frame.
+
+Not verified: whether the long jump from the ledge end at (31,3) lands in the gap at (35,4) (the level file suggests it); no run has reached the ledge since the change. Getting there is now a goal-choice problem more than a timing one.
+
+## Level 3 gun and goal credit (2026-10-04)
+
+The problem: in a live arm C level 3 run (Jev with the Azure planner), Dave spent 175 of 246 decisions shuffling between (7,6) and (8,6) and never took the gun at (10,4).
+- **Not the physics.** Jumps right from (8,6) really burn on the vine (the threat screen was right), and the reach estimate's own path was right too: walk to (6,6), then a long jump that takes the gun in flight and lands on (12,6). The real game confirms it (`scripts/try_skills.py --scenario level3 jump_right move_left_1 move_left_1 jump_right`).
+- **The route notes compared exact cells.** Dave lands at x 126, not a multiple of 16, so from his real take-off (x 94) the jump lands on (11,6) and not the planned (12,6). No option at (7,6) or (8,6) got a `route:` note (found by replaying the recorded choices).
+- **Nothing measured progress.** The graph scored the c2↔c6 jumps 37/37 and 29/29.
+
+Changes (`docs/planner.md` "Reachability waypoints", `docs/memory.md` "Goal credit", `docs/graph.md` "Route search"):
+- **Route notes match landings by platform** (`ReachMap.same_platform`) and judge hazards with the game's contact test (`ReachMap.burns`).
+- **Mid-air pickups:** `targets_for` adds the take-offs of jumps whose flight touches the item (`grab_takeoffs`); the option whose path takes the target gets `route: picks up the gun on the way`; the waypoint is the take-off while Dave walks to it. `DAVE_BOX` and `HAZARD_BOX` moved to `reach.py` (`threats.py` imports them).
+- **Goal credit:** every arm gets `for this goal from here: …` notes from this episode. Arm C learns per-platform credit per target across runs (`past goals like this one from this platform: 3/4 reached …`), and its learned routes weigh moves by it (`graph.credit_bonus`, `graph.credit_penalty`). The viewer's graph panel shows the credit.
+- **Descriptions** are capped at 320 characters (`DESCRIPTION_MAX`), up from 200, because the notes were being cut.
+- **`scripts/follow_route.py`:** the real game with the rule planner and a route-following controller.
+
+Checks:
+- `uv run pytest`: 322 passed, 1 skipped, including `test_credit.py` (4), new level 3 cases in `test_platforms.py`, and `tests/integration/test_dave_credit.py` (real game: the gun on the 4th move, no deaths, `jump_right` credited).
+- `follow_route.py`: level 3 takes the gun with no deaths (it then waits under `explore:right` from (1,5), where no option gets a route note); level 1 completes in 470 frames; level 2 completes in 6941 frames with no deaths (the rule planner re-picked `collect:loot:c36:r9` 20 times).
+- Two in-memory level 3 runs on one graph: the second run's options carry the learned credit.
+- Offline traces: fixture 41/17 `38b901ad24333f4f` and level 1 `97b1dc188deb88ba` are unchanged. Level 2 is `de71bd676c0b1599`, the same with the new features patched out, so it already changed with the threat screen; the `2a57449186e2a6b3` above predates it.
+- Not run: a paid live Jev run with the new notes.
 
 ## Verification (run 2026-10-03)
 

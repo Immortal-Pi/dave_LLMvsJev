@@ -65,7 +65,8 @@ class ModelsConfig(Strict):
 
 
 MAX_SKILL_FRAMES = 600
-InterruptReason = Literal["death", "terminal", "hazard_contact", "new_hazard_nearby", "threat_incoming"]
+InterruptReason = Literal["death", "terminal", "hazard_contact", "new_hazard_nearby", "threat_incoming",
+                          "threat_sighted"]
 
 
 class SkillPhase(Strict):
@@ -144,6 +145,7 @@ class ReachConfig(Strict):
     walk_px_per_3_ticks: PositiveInt  # walking speed
     fall_px_per_tick: PositiveInt  # free fall after the arc or off an edge
     short_hold_ticks: PositiveInt  # how long the *_short jumps hold the direction
+    mid_hold_ticks: tuple[PositiveInt, ...] = ()  # the other fixed holds (jump_*_4, jump_*_5)
     body_px: tuple[NonNegativeInt, NonNegativeInt]  # x offsets of the wall-collision box's left/right edge
     foot_px: tuple[NonNegativeInt, NonNegativeInt]  # x offsets of the two points that need ground under them
     head_px: tuple[NonNegativeInt, NonNegativeInt] = (4, 9)  # x offsets of the ceiling test points (dave.c)
@@ -203,6 +205,11 @@ class GraphConfig(Strict):
     p_min: Annotated[float, Field(gt=0, lt=1)]
     p_max: Annotated[float, Field(gt=0, lt=1)]
     evidence_per_item: PositiveInt
+    # Goal credit (control/credit.py): a move's cost toward a target is multiplied by
+    # 1 + credit_penalty * (1 - rate) - credit_bonus * rate, where rate is the share of past goals
+    # for that target that used the move from that platform and were achieved.
+    credit_bonus: Annotated[float, Field(ge=0, lt=1)] = 0.5
+    credit_penalty: Annotated[float, Field(ge=0)] = 1.0
 
     @model_validator(mode="after")
     def _clip_ordered(self) -> GraphConfig:

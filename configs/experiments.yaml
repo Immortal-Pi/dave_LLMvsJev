@@ -16,6 +16,8 @@ graph:
   p_min: 0.05
   p_max: 0.99
   evidence_per_item: 20        # evidence ids kept per node/edge (the count is always kept)
+  credit_bonus: 0.5            # goal credit: moves that led to the target cost up to half as much
+  credit_penalty: 1.0          # and moves tried for it that never led there up to twice as much
 planning:
   no_progress_frames: 180
   repeated_skill_failures: 3
