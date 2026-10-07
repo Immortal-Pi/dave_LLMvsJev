@@ -91,6 +91,9 @@ def load_recorded(store: Path, run_id: str) -> Recorded:
         key = ep["episode_key"]
         raw = json.loads(run["config_json"])
         config = AppConfig.model_validate({k: v for k, v in raw.items() if k in AppConfig.model_fields})
+        if config.environment.execution_mode == "real_time":
+            raise InspectError(f"run {run_id!r} ran in real time (the game ran on while models thought); "
+                               "it cannot be replayed exactly, so it cannot be inspected")
         decisions = [dict(r) for r in conn.execute(
             "SELECT d.*, s.skill, s.outcome AS skill_outcome, s.reason AS skill_reason, s.frames AS skill_frames, "
             "o.observation_json, eo.observation_json AS end_json FROM decisions d "

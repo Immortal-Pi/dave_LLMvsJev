@@ -18,7 +18,7 @@ cd frontend; npm run dev                    # then open http://localhost:3000/li
 
 It runs one episode at a time, exactly as `play` runs it (`run_trial`): the same models, goal manager, threat screen, episode store and graph store. A live run can be inspected afterwards with `dave-agent inspect`. Only two things are added, and neither changes a decision:
 - **`LiveAdapter`** paces the game at `--tick-ms` per tick (default 14 ms, the game's own speed). It saves a frame every `--frame-every` ticks (default 3), and on every model decision.
-  - The game stays paused while a model decides, as in every run, so the page shows "… is choosing among N skills (game paused)".
+  - By default the game stays paused while a model decides, as in every `play` and benchmark run, so the page shows "… is choosing among N skills (game paused)". The **Pause game while models think** toggle turns this off for one run (below).
   - Frames come from the bridge's `screenshot` command: 320×200 with the HUD, headless, no window needed.
 - **`run_episode(on_event=…)`** is a write-only hook. A failing viewer is logged and never stops the episode. It reports:
 
@@ -38,12 +38,25 @@ It runs one episode at a time, exactly as `play` runs it (`run_trial`): the same
 
 The hub keeps only the newest `graph` event (each is a full snapshot of 10–20 KB), so a reload replays one.
 
+### Pause off: the game runs on while models think
+
+Untick **Pause game while models think** (`POST /start` with `"pause": false`) to run that episode with `environment.execution_mode: real_time` (`run_episode(realtime=True)`; the run's recorded config says so):
+- **Waiting:** planner and tactical calls run on a worker thread. Meanwhile the game keeps going at `--tick-ms` per tick with no keys pressed: Dave stands still while monsters and shots move. A slow model (Azure, about 2.5 s, which is about 180 ticks) loses far more game time than Jev (about 0.2 s).
+- **When the choice arrives,** it is checked against the latest observation:
+  - It is **dropped** if, during the wait, Dave died or respawned, the episode ended, the chosen skill is no longer legal, or the threat screen now removes it. A `decision_stale` event is logged, the calls are still recorded, the card shows "too late (…), deciding again", and the model is asked again on the current state.
+  - **Otherwise** the chosen skill runs from the latest observation. A `decision_latency` event is logged, and the card shows "game ran N ticks meanwhile".
+- **Waits after the planner:** events that happen during a planner wait (a death, say) reach the goal manager with the next skill's events.
+- **Limits:**
+  - These episodes depend on model latency. `dave-agent inspect` and `replay` refuse them.
+  - `--tick-ms 0` refuses pause off, because unpaced idle ticks would run flat out.
+  - `play` and `benchmark` stay paused (Phase 11 item 1, live viewer only so far).
+
 **Routes** (127.0.0.1, CORS `*`):
 
 | Route | Purpose |
 | --- | --- |
 | `GET /status` | idle or running, levels, arms, `allow_paid` |
-| `POST /start` | `{scenario, arm, planner: mock\|live, tactical: mock\|live, seed?}`; 400 with a message when refused |
+| `POST /start` | `{scenario, arm, planner: mock\|live, tactical: mock\|live, seed?, pause?}` (`pause` defaults to true); 400 with a message when refused |
 | `POST /stop` | stop at the next tick; the episode is recorded as `truncated` / `interrupted` |
 | `GET /events` | Server-Sent Events. The current run's events are replayed first, so a reload, or a reconnect with `Last-Event-ID`, catches up. |
 | `GET /frame` | the latest frame (BMP), 204 before the first |
@@ -83,5 +96,12 @@ Mock models give no probabilities or waypoints. The rule planner never gives way
 - Stop records an interrupted episode;
 - a graph-arm run is summarised;
 - the HTTP routes and the SSE stream.
+
+`tests/unit/test_realtime.py` covers pause off:
+- the game advances with no keys while a slow model decides;
+- paused mode takes no idle ticks;
+- a late choice is stale after a death or when its skill is no longer legal;
+- the toggle is refused at `--tick-ms 0`;
+- inspect refuses a real-time run.
 
 The page was checked on the real game in headless Chrome (level 2, arm C, mock).

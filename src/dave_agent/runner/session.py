@@ -171,6 +171,7 @@ def run_trial(config: AppConfig, arm_name: str, models: Models, adapter: GameAda
             max_wall_seconds=config.benchmark.max_episode_wall_seconds,
             evidence=use_graph,  # "past runs" notes, also from a frozen warm checkpoint
             on_event=on_event,  # the live viewer (runner/live.py); write-only
+            realtime=config.environment.execution_mode == "real_time",
         )
     except BaseException as exc:
         exc.episode_recorder = recorder  # callers of an interrupted run still know its episode key

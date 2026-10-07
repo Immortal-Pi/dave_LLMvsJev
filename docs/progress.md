@@ -481,6 +481,18 @@ Checks:
 - Offline traces: fixture 41/17 `38b901ad24333f4f` and level 1 `97b1dc188deb88ba` are unchanged. Level 2 is `de71bd676c0b1599`, the same with the new features patched out, so it already changed with the threat screen; the `2a57449186e2a6b3` above predates it.
 - Not run: a paid live Jev run with the new notes.
 
+## Live viewer: pause off (2026-10-06)
+
+Phase 11 item 1 has started, in the live viewer only. The `/live` toggle **Pause game while models think** (`POST /start` `pause: false`) runs one episode with `execution_mode: real_time`:
+- Planner and tactical calls run on a worker thread. Meanwhile the game ticks on with no keys pressed.
+- A late choice is revalidated on the latest observation. It is dropped and decided again (`decision_stale`) after a death or respawn, or when its skill is illegal or screened. Otherwise it runs, and `decision_latency` records the wait.
+- Inspect and replay refuse these runs. `play` and `benchmark` are unchanged (paused). See `docs/live.md`.
+
+Checks:
+- `uv run pytest`: all pass, including `tests/unit/test_realtime.py` (4).
+- Real game, level 1, rule planner, a mock controller sleeping 0.2 s (Jev-like), 1500 frames: 20 decisions, each waiting about 16 ticks, no stale choices, no deaths.
+- Not run: a paid live Jev or Azure run with pause off.
+
 ## Verification (run 2026-10-03)
 
 ```bash
@@ -665,7 +677,7 @@ Live evidence covers **arms A, B and C** (labeled `mode=live`): one smoke episod
 - Mock tactical controllers ignore goals, so mock runs mostly show `stuck` and expiry triggers.
 - `explore` targets are a direction and a column, not a verified reachable location.
 - Azure cost is not computed (no price table); token usage is recorded per call, so `max_cost_usd_per_episode` cannot fire for Azure.
-- Live Azure tactical calls average about 2.5–2.8 s, mostly reasoning tokens (about 380–430 per call at `reasoning_effort: low`). Lower settings were not tested on this deployment. Jev calls average about 0.2 s, but the game is paused during decisions, so latency does not affect play yet (Phase 11).
+- Live Azure tactical calls average about 2.5–2.8 s, mostly reasoning tokens (about 380–430 per call at `reasoning_effort: low`). Lower settings were not tested on this deployment. Jev calls average about 0.2 s. The game is paused during decisions everywhere except the live viewer with pause off (2026-10-06), so latency does not affect benchmark play yet (Phase 11).
 - Jev's chosen-candidate probabilities on Dave were mostly 0.24–0.52, spread across walking and jumping skills.
 - The planner (live and rule-based) always prioritises the trophy, so Dave no longer wanders into coins as the random mock did. This is intended: coins only add score.
 - The route-relevant facts the models lack are which jump lands where (narrow pillars), and the hidden landing cooldown, which `wait_short` covers but which is not observable.

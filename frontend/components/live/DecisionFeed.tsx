@@ -53,7 +53,13 @@ function DecisionCard({ d, outcome, who }: { d: DecisionEvent; outcome: OutcomeE
           {" "}
           · at {fmtTile(d.tile)} · frame {d.frame}
           {latency ? ` · ${Math.round(latency)} ms` : ""}
+          {d.wait_ticks ? ` · game ran ${d.wait_ticks} ticks meanwhile` : ""}
         </span>
+        {d.stale ? (
+          <span className="badge warn" title="the choice came too late for the game; the model is asked again">
+            too late ({d.stale}), deciding again
+          </span>
+        ) : null}
         {onRoute.length ? (
           onRoute.includes(d.chosen) ? (
             <span className="badge ok" title="the chosen skill makes the planned route's next move">on route</span>
@@ -89,9 +95,11 @@ function DecisionCard({ d, outcome, who }: { d: DecisionEvent; outcome: OutcomeE
           ))}
         </ul>
       ) : null}
-      <div>
-        <Outcome o={outcome} />
-      </div>
+      {d.stale ? null : (
+        <div>
+          <Outcome o={outcome} />
+        </div>
+      )}
     </article>
   );
 }

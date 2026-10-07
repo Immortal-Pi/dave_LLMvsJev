@@ -17,6 +17,7 @@ export default function LivePage() {
   const [arm, setArm] = useState("B");
   const [planner, setPlanner] = useState("mock");
   const [tactical, setTactical] = useState("mock");
+  const [pause, setPause] = useState(true);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
@@ -32,7 +33,7 @@ export default function LivePage() {
     setBusy(true);
     setError(null);
     try {
-      setError(await startRun({ scenario, arm, planner, tactical }));
+      setError(await startRun({ scenario, arm, planner, tactical, pause }));
     } catch {
       setError(`No live server at ${LIVE_URL}. Start it with: uv run dave-agent live`);
     } finally {
@@ -48,8 +49,9 @@ export default function LivePage() {
         arm: run.arm,
         planner: run.planner.startsWith("mock") ? "mock" : "live",
         tactical: run.tactical.startsWith("mock") ? "mock" : "live",
+        pause: run.pause !== false,
       }
-    : { scenario, arm, planner, tactical };
+    : { scenario, arm, planner, tactical, pause };
   const paid = planner === "live" || tactical === "live";
   return (
     <div className="live">
@@ -85,6 +87,10 @@ export default function LivePage() {
             <option value="mock">mock (free)</option>
             <option value="live">{shown.arm === "A" ? "Azure LLM" : "Jev"} (paid)</option>
           </select>
+        </label>
+        <label className="check" title="Off: the game keeps running while Jev or the LLM decides, and Dave stands still meanwhile">
+          <input type="checkbox" checked={shown.pause} onChange={(e) => setPause(e.target.checked)} disabled={live.running} />
+          Pause game while models think
         </label>
         {live.running ? (
           <button type="button" className="stop" onClick={() => stopRun()}>

@@ -238,6 +238,11 @@ EventType = Literal[
     "candidates_screened",
     # A death by plasma or a monster after a move the threat check predicted safe (goals.py).
     "forecast_miss",
+    # Real-time mode (runner/episode.py): the game ran on while a model decided. Latency: the
+    # choice ran after the wait; stale: it was dropped and decided again (payload: wait_ticks,
+    # decided_frame, start_frame, reason).
+    "decision_latency",
+    "decision_stale",
 ]
 
 

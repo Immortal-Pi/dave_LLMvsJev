@@ -21,6 +21,7 @@ from dave_agent.control.skills import execute, generate_candidates
 from dave_agent.schemas import Observation
 
 _VOLATILE = {"observation_id": 0, "episode_id": "replay"}
+REALTIME_EVENTS = frozenset({"decision_latency", "decision_stale"})  # runner/episode.py real-time mode
 
 
 @dataclass
@@ -58,6 +59,10 @@ def replay_episode(
 ) -> ReplayReport:
     (episode,) = records["episode"]
     report = ReplayReport(episode["episode_key"])
+    if any(e["event_type"] in REALTIME_EVENTS for e in records["event"]):
+        report.mismatches.append("real-time episode: the game ran on while models thought, so it cannot be "
+                                 "replayed exactly (the waits depend on model latency)")
+        return report
     observations = {o["observation_id"]: Observation.model_validate(o["observation"])
                     for o in records["observation"]}
     executions = {e["decision_seq"]: e for e in records["skill_execution"]}

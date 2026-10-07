@@ -37,6 +37,8 @@ export type RunInfo = {
   planner: string;
   tactical: string;
   arm_config: { planner: string; tactical: string; graph_enabled: boolean };
+  /** false: the game runs on while models think (absent on older servers: paused). */
+  pause?: boolean;
 };
 
 export type LevelMapView = {
@@ -117,6 +119,12 @@ export type DecisionEvent = ObsView & {
   probabilities: Record<string, number> | null;
   calls: CallView[];
   threats?: ThreatPath[];
+  /** Pause off only: game ticks that passed while the model thought. */
+  wait_ticks?: number;
+  /** Pause off only: the candidate id the choice ran as on the latest observation. */
+  runs?: string;
+  /** Pause off only: why the choice came too late and was dropped (then decided again). */
+  stale?: string;
 };
 
 export type OutcomeEvent = ObsView & {
@@ -402,7 +410,7 @@ function step(state: LiveState, action: Action): LiveState {
       const feed = [...state.feed];
       for (let i = feed.length - 1; i >= 0; i--) {
         const item = feed[i];
-        if (item.kind === "decision" && !item.outcome && item.d.chosen === o.candidate_id) {
+        if (item.kind === "decision" && !item.outcome && !item.d.stale && (item.d.runs ?? item.d.chosen) === o.candidate_id) {
           feed[i] = { ...item, outcome: o };
           break;
         }
@@ -458,7 +466,7 @@ export async function getStatus(): Promise<ServerStatus> {
   return res.json();
 }
 
-export async function startRun(body: { scenario: string; arm: string; planner: string; tactical: string }): Promise<string | null> {
+export async function startRun(body: { scenario: string; arm: string; planner: string; tactical: string; pause: boolean }): Promise<string | null> {
   const res = await fetch(`${LIVE_URL}/start`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },

@@ -48,7 +48,7 @@ Dave's hitbox is 20 px wide, wider than a tile. Starting a long jump right next 
 - **Revalidation:** before the first input, the candidate's preconditions are re-checked on the latest observation. A candidate whose `max_frames` differs from the catalog is also rejected.
 - **No reflexes:** the executor never chooses inputs of its own. Avoiding enemies is the controller's job; the threat screen below only removes options.
 - **Paused mode** (default): the game advances only inside `execute`, so it is frozen while a model decides.
-- **Real-time mode** (Phase 11): a stale decision will be replaced by `stale_fallback()`, the first offered candidate that presses no buttons (a wait).
+- **Real-time mode** (Phase 11): so far only in the live viewer, with its pause toggle off (`docs/live.md`). Dave stands still with no keys pressed while a model decides. When the choice arrives, it is revalidated on the latest observation. It is dropped and decided again (`decision_stale`) if Dave died or respawned, the skill is no longer legal, or the threat screen now removes it. `stale_fallback()` (the first offered wait) is not used yet.
 - **Forced decisions:** when exactly one candidate is legal (for example `wait_long` while burning), the runner picks it without a model call and marks it `Decision.forced=True`. This applies to every arm.
 
 ## Legal-action masks
