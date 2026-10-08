@@ -63,6 +63,9 @@ SACRIFICE_FRAMES = 1200
 # and short hops; the person used 681 of 900 for the trophy at (5,2) and the door.
 FUEL_RESERVE = 400
 REQUIRED_GOALS = ("collect:trophy", "reach:door")
+FULL_FUEL = 900  # one jetpack pickup (docs/state_mapping.md): what a flight-only goal needs is assumed
+# The rule priority chooses unless one of these triggers fired (planning.llm_calls: escalate).
+ESCALATE_TRIGGERS = frozenset({"stuck", "repeated_failures", "death"})
 SACRIFICE_LIVES = 2
 
 
@@ -239,6 +242,7 @@ class PlanningRecord:
     route: dict[str, Any] | None
     route_ms: float
     model_ms: float
+    planner: str = "llm"  # who chose: llm, rule (escalate mode, no call) or fallback
 
 
 @dataclass
@@ -426,6 +430,10 @@ class GoalManager:
             candidates = tuple(c.model_copy(update={"path": self.platforms.path_note(
                 (c.target.col, c.target.row), DIRECTIONS.get(c.target_name, 0) if c.goal_type == "explore" else 0)})
                 for c in candidates)
+            # Loot is score only: with no known path it is noise for both planners.
+            candidates = tuple(c for c in candidates
+                               if not (c.target_kind == "collectible" and _no_path(c))) or candidates
+            candidates = self._requires(obs, candidates)
         route_ms = 0.0  # Python route search, timed separately from model latency (graph arms only)
         if self.graph is not None:
             t0 = time.perf_counter()
@@ -437,7 +445,12 @@ class GoalManager:
 
         chosen, fallback_reason, errors, attempts, model_ms = None, None, [], 0, 0.0
         partial = None  # a valid goal whose waypoints were rejected: used once the retries run out
-        if self.calls >= self.cfg.max_calls_per_episode:
+        avoid = self.previous["target_ref"] if self.previous and self.previous["status"] != "achieved" else None
+        source = "llm"
+        if self.cfg.llm_calls == "escalate" and not self._escalate(triggers, rule_choice(candidates, avoid)):
+            pick = rule_choice(candidates, avoid)
+            chosen, source = (pick, f"rule priority ({pick.goal_type})", []), "rule"
+        elif self.calls >= self.cfg.max_calls_per_episode:
             fallback_reason = "call_cap"
         else:
             feedback = None
@@ -484,9 +497,8 @@ class GoalManager:
                 self._pending.clear()  # keep the still-valid goal; nothing to replace it with
                 self._failures = 0
                 return step
-            avoid = self.previous["target_ref"] if self.previous and self.previous["status"] != "achieved" else None
             pick = rule_choice(candidates, avoid)
-            chosen = (pick, f"deterministic fallback ({fallback_reason})", [])
+            chosen, source = (pick, f"deterministic fallback ({fallback_reason})", []), "fallback"
 
         candidate, rationale, waypoints = chosen
         if self.log.open_goal is not None:
@@ -499,14 +511,15 @@ class GoalManager:
                                 request=request, chosen=candidate.candidate_id, fallback=fallback_reason is not None,
                                 fallback_reason=fallback_reason, attempts=attempts, errors=errors,
                                 goal_id=goal.goal_id, route=route, route_ms=round(route_ms, 3),
-                                model_ms=round(model_ms, 1))
+                                model_ms=round(model_ms, 1), planner=source)
         step.record = record
         step.events.append(Event(
             event_type="goal_set", episode_id=obs.episode_id, frame=obs.frame, location=candidate.target,
             entity_refs=(goal.goal_id,), certainty="derived",
             payload={"goal_id": goal.goal_id, "target_ref": goal.target_ref, "goal_type": goal.goal_type,
                      "triggers": list(record.triggers), "fallback": record.fallback,
-                     "fallback_reason": fallback_reason, "attempts": attempts, "rationale": goal.rationale,
+                     "fallback_reason": fallback_reason, "attempts": attempts, "planner": source,
+                     "rationale": goal.rationale,
                      "waypoint": goal.next_waypoint.model_dump() if goal.next_waypoint else None,
                      "route": route, "route_ms": record.route_ms, "model_ms": record.model_ms,
                      "waypoints": [[w.col, w.row] for w in waypoints],
@@ -631,6 +644,8 @@ class GoalManager:
         for c in candidates:
             notes = []
             if here is not None:
+                if self._fuel and specs[c.skill].buttons == {"jetpack"} and c.candidate_id not in route:
+                    notes.append(f"uses fuel ({self._fuel} left): not needed for the planned route")
                 if c.candidate_id in self.scores:
                     notes.append(self.scores[c.candidate_id].note())
                 end = ends[c.candidate_id]
@@ -1059,7 +1074,7 @@ class GoalManager:
                 cell = (w[0], w[1])
             if not self._standable(*cell):
                 return valid, [(f"waypoint {given} is not an empty explored cell directly above a '#' on the map; "
-                                "give standing tiles [col, row] or platform ids")]
+                                "give platform ids from `platforms`")]
             if reach is not None and prev is not None and reach.path(prev, {cell}) is None:
                 return valid, [self._unreachable(reach, prev, cell, f"waypoint {given}")]
             valid.append(TilePos(col=cell[0], row=cell[1]))
@@ -1200,6 +1215,33 @@ class GoalManager:
                 prev = c
         return out
 
+    def _escalate(self, triggers: set[str], rule: GoalCandidate) -> bool:
+        """Escalate mode: whether the planner model decides this time. It does on a trigger that
+        needs reasoning (stuck, repeated failures, a death), and when the rule's choice already
+        ended without success ``rule_repeat_limit`` times on this level (a rule loop)."""
+        if triggers & ESCALATE_TRIGGERS:
+            return True
+        failed = sum(a["goal"] == rule.candidate_id and a["outcome"] != "achieved" for a in self.log.attempts)
+        return failed >= self.cfg.rule_repeat_limit
+
+    def _requires(self, obs: Observation,
+                  candidates: tuple[GoalCandidate, ...]) -> tuple[GoalCandidate, ...]:
+        """Mark the item goals that only a flight reaches while Dave has no fuel: ``requires``
+        the jetpack, and the path says so (with where the jetpack is, when known)."""
+        here = self._located(obs)
+        if self._fuel or here is None or self.reach is None:
+            return candidates
+        jetpack = next((c for c in candidates if c.goal_type == "collect" and c.target_name == "jetpack"), None)
+        flying = ReachMap(self._cells, self.reach, self.log.failures(), self._risky, fuel=FULL_FUEL)
+        out = []
+        for c in candidates:
+            if c.goal_type in ("collect", "reach") and c is not jetpack and _no_path(c) and                     flying.path(here, flying.targets_for((c.target.col, c.target.row))) is not None:
+                where = f"; jetpack at ({jetpack.target.col},{jetpack.target.row})" if jetpack else ""
+                c = c.model_copy(update={"requires": ("jetpack",),
+                                         "path": f"{c.path}; reachable with the jetpack (not held{where})"})
+            out.append(c)
+        return tuple(out)
+
     def _platforms(self, obs: Observation, candidates: tuple[GoalCandidate, ...]) -> Platforms | None:
         reach = self._reach_map()
         if reach is None:
@@ -1338,7 +1380,8 @@ class GoalManager:
             episode_id=obs.episode_id, level_id=obs.level_id, frame=obs.frame, observation_id=obs.observation_id,
             triggers=triggers,
             player={"tile": [here.col, here.row] if here else None, "state": obs.player_state,
-                    "grounded": obs.grounded, "facing": obs.facing},
+                    "grounded": obs.grounded, "facing": obs.facing,
+                    "fuel": {"left": self._fuel, "reserve": FUEL_RESERVE}},
             lives=obs.lives, inventory=obs.inventory, score=obs.score,
             view_cols=(obs.region.min.col, obs.region.max.col), nearby=tuple(nearby[:MAX_NEARBY]),
             recent=recent, previous_goal=self.previous,
@@ -1349,6 +1392,10 @@ class GoalManager:
             platforms=tuple(self.platforms.views()) if self.platforms is not None else (),
             attempts=tuple(self.log.views()), failed_links=tuple(self.log.failed_links()),
         )
+
+
+def _no_path(candidate: GoalCandidate) -> bool:
+    return bool(candidate.path and candidate.path.startswith("no known path"))
 
 
 def _blocks(contact: Contact | None) -> bool:

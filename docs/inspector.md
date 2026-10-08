@@ -52,6 +52,16 @@ uv run dave-agent inspect ... --decisions 93-94 --ask jev --ask azure   # PAID: 
 
 `schema_version` is 1. The Azure body carries `<deployment>` instead of the deployment name, and no body contains credentials.
 
+## Re-asking the planner (`scripts/replan.py`)
+
+```bash
+uv run python scripts/replan.py artifacts/inspect/<run-id> --limit 10   # PAID: one Azure call per planner request
+```
+
+It takes each distinct planner request in the bundle (`planner.request`), sends it to the Azure planner with the **current** prompt and `models.planner` settings, and prints the recorded choice (the `goal_set` made from that request) beside the new one, with its waypoints and rationale. Use it to check a planner prompt change on real situations without playing.
+- The requests are as recorded: fields added later (`requires`, `player.fuel`) are missing from old bundles, and candidates later left out (unreachable loot) are still offered.
+- Waypoints are printed, not checked; that needs the game state.
+
 ## Viewer (`frontend/`)
 
 A local, read-only Next.js app (App Router, TypeScript). It reads bundles from `INSPECT_DIR`, which defaults to `../artifacts/inspect`, and never calls a model or writes a file. This is a user decision that overrides the spec's "no web application" for V1; the app is not deployed.

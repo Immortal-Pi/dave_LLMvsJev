@@ -470,7 +470,7 @@ def _plan_view(step: PlanningStep) -> dict[str, Any]:
             "rationale": goal.get("rationale"), "waypoint": goal.get("waypoint"),
             "waypoints": goal.get("waypoints") or [], "route": r.route, "fallback": r.fallback,
             "fallback_reason": r.fallback_reason, "attempts": r.attempts, "errors": r.errors,
-            "model_ms": r.model_ms, "calls": [_call_view(c) for c in step.calls],
+            "planner": r.planner, "model_ms": r.model_ms, "calls": [_call_view(c) for c in step.calls],
             "candidates": [{"id": c.candidate_id, "description": c.description, "route": c.route, "path": c.path}
                            for c in r.request.candidates],
             "map": r.request.map, "platforms": list(r.request.platforms), "tried": list(r.request.attempts),

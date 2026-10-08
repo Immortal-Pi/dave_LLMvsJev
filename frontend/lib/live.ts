@@ -96,6 +96,8 @@ export type PlanEvent = {
   fallback_reason: string | null;
   attempts: number;
   errors: string[];
+  /** Who chose: the planner model, the rule priority without a call (planning.llm_calls: escalate), or the fallback. */
+  planner?: "llm" | "rule" | "fallback";
   model_ms: number;
   calls: CallView[];
   candidates: { id: string; description: string; route: Record<string, unknown> | null; path?: string | null }[];

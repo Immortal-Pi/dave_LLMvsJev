@@ -34,6 +34,8 @@ It is the "discovered-map memory" from `docs/feasibility.md` §6: only observati
 
 - **Description:** each candidate says, in game terms, what it is and how far away (e.g. "Collect the trophy at tile (11,3); 9 tiles right, 6 rows up").
 - **Constraints:** `hazard_near_target` (a known hazard within 1 tile) and `target_out_of_view`.
+- **Unreachable loot is left out** (adapters with a reach envelope): a loot candidate whose `path` is `no known path …` is dropped. It only adds score, and it was noise for both planners: on level 4 the live planner chose loot for almost a whole run.
+- **`requires`:** an item or door goal with no known path while Dave has no fuel is checked again as if he had a full jetpack (`FULL_FUEL`, 900). When a flight gets there, the candidate gets `requires: ["jetpack"]` and its `path` ends `; reachable with the jetpack (not held; jetpack at (c,r))`. Level 4's trophy at (5,2) is reached only by flight.
 - **Goal:** the chosen candidate becomes a `schemas.Goal` with:
   - `goal_id` `g1`, `g2`, …, and `target_ref` the candidate id;
   - `deadline_frame = frame + planning.goal_timeout_frames`;
@@ -69,17 +71,30 @@ Goals are checked after every skill, never per frame. Event payloads carry `goal
 
 ### Calls, retries and fallback
 
-- **Validation:** `parse_plan` requires `{"goal": <offered id>, "rationale": str, "waypoints": [[col, row], ...]}`, where `waypoints` is optional with at most 5. The goal manager then checks every waypoint against the explored map (see "Map and waypoints").
+- **Validation:** `parse_plan` requires `{"goal": <offered id>, "rationale": str, "waypoints": [...]}`, where `waypoints` (platform ids or `[col, row]` tiles) is optional with at most 5. The Azure planner's schema allows platform ids only. The goal manager then checks every waypoint against the explored map (see "Map and waypoints").
 - **Rejected output:** a malformed or unknown answer is marked `invalid_output` and retried with the validation error as feedback, at most `models.max_retries` (1) times. Each attempt counts toward `planning.max_calls_per_episode` (30). A failed transport call is marked `error` or `timeout`. Every rejected or failed attempt emits a `model_failure` event with `purpose=planner`.
 - **No valid answer, or the cap is reached:**
   - on a soft trigger, the current goal is kept;
   - otherwise a **deterministic fallback** picks the first candidate by the fixed priority, skipping a goal that just failed. It is logged with `fallback=true` and `fallback_reason` (`planner_failed` or `call_cap`).
 - **Same rule offline:** the offline `RuleMockPlanner` uses the same priority, so mock runs are reproducible.
+- **The rule (`rule_choice`):** candidates with a known path first, then the fixed priority, skipping a goal that just failed. A pick that `requires` an offered item gives way to that item (the jetpack before a flight-only trophy).
+
+### Rule first, the planner model when needed (`planning.llm_calls`)
+
+- **`always`** (the default, and every run recorded before it existed): every planning point calls the planner.
+- **`escalate`** (`configs/watch.yaml`, `configs/benchmark_dave.yaml`): the rule chooses, with no call, unless:
+  - the triggers include `stuck`, `repeated_failures` or `death`; or
+  - the rule's choice already ended without success `planning.rule_repeat_limit` (2) times among this level's last 6 attempts (a rule loop: the follower re-picked `collect:loot:c19:r4` about 27 times on level 3).
+
+  Then the planner is called as usual (cap, retries, fallback).
+- **Why:** the rule wins wherever the reach estimate already knows the way (trophy, then door), and the live planner lost runs there (loot fixation, waypoints through walls). The planner model is kept for the situations that need reasoning.
+- **Record:** `goal_set` and `PlanningRecord` carry `planner`: `rule` (escalate mode, no call), `llm` or `fallback`. A rule goal has `attempts: 0`, so the inspector's replay feeds it no planner output.
+- **Arms:** every arm runs the same code, so A, B and C still differ only in their tactical model and the graph.
 
 ## Planner input (`PlanningRequest`)
 
 - **Triggers.**
-- **Player:** state, grounded, facing, lives, inventory and score.
+- **Player:** state, grounded, facing, lives, inventory and score, and `fuel`: `{"left": <jetpack fuel>, "reserve": FUEL_RESERVE}` (see "Flying").
 - **View columns.**
 - **Nearby:** visible hazards within 3 tiles and visible monsters, at most 10.
 - **Recent skills:** the last `planning.recent_events` (8), with each skill's outcome, reason, events and end tile.
@@ -137,6 +152,11 @@ An LLM reads a character grid poorly, especially which column a wall is in (on l
 
 **Flying.** With jetpack fuel, the reach estimate also flies (`ReachMap(fuel=...)`): from any cell it searches the known open cells (no brick, hazard or unseen cell) as far as the fuel goes at 16 ticks a cell (`fly_cells`), and offers a `fly` move to every standable cell, and to the goal's own cell when it floats in the air (`targets_for`: level 4's trophy at (5,2)). A flight costs 8 plus 1 a cell, more than walking (1 a cell) or a jump (about 2), so routes fly only where nothing else gets there or it is much shorter. Fuel is kept for the goals that may need a flight to finish the level: the trophy and the door fly on all of it, other goals only on what is above `FUEL_RESERVE` (400 ticks; the person used 681 of 900 on level 4). Fuel is not tracked along a route: each flight checks the fuel Dave has now. The route notes: standing with a flight next, `route: turns the jetpack on for the flight to [69, 2]`; flying, the moves that end nearest the cell 3 cells along the shortest flight (simulated, so walls and ceilings count and a nudge that lines Dave up with a gap can be the one), `route: flies toward [69, 2]`; at a standable end, `route: turns the jetpack off and lands on ...` when dropping lands him there (`GoalManager._fly_notes`). Level 3 on the real game: from the jetpack, `jetpack_on`, 4x `fly_up_1`, `fly_right_3`, `fly_up_3` (stopped by the ceiling), `fly_left_1`, `fly_up_3` into the door: level complete.
 
+**Saving fuel.** Every tick with the jetpack on burns one fuel, hovering too (`GAME_RULES`). Besides the route costs and `FUEL_RESERVE`, the models are told:
+- **Planner:** `player.fuel` (`left`, `reserve`) and the prompt's fuel rule (see "Azure planner").
+- **Tactical model** (`TACTICAL_TASK`, every arm, LLM and Jev): turn the jetpack on only when a `route:` note says so, and turn it off rather than hover once the route says to land.
+- **Option note:** standing with fuel, a `jetpack_on` option without a `route:` note gets `uses fuel (N left): not needed for the planned route` (`GoalManager.annotate`). It informs only; nothing is masked.
+
 Route jumps whose flight enters an unseen cell are left out (`ReachMap.known_flight`): what is there is unknown, and treating it as a wall bounced the long jump from level 3's (29,6) off the screen's last column, while in the game it flew on into the fire. When no standable cell touches the explored edge (level 3: the screen's last column is a fire pit), the frontier is the furthest standable cells that way; walking there scrolls the screen. Before, `explore:right` had no target there and Dave waited at (1,5) with no route note.
 - **The rule planner** (mock and the deterministic fallback) ranks goals with a known `path` first, then by its fixed priority.
 - **Each candidate's `path`:** the estimated chain, e.g. `c1r9 -jump right-> c4r7 -jump left-> c2r5 -jump right-> c4r3 -jump right-> c8r4 -jump right-> c13r8` (the level 2 trophy, the climb over the left ledges), or `no known path over the explored platforms; nearest reachable platform: c16r5`.
@@ -162,13 +182,17 @@ This is per-episode memory, not the learned graph: only graph arms remember acro
 - **Prompt:** the system prompt states:
   - only the rules verified in `docs/feasibility.md` §3;
   - the planner's role;
-  - how to read `platforms` (exits, reachability; walls are missing exits), candidate `path`s and the map;
+  - how to read `platforms` (exits, reachability; walls are missing exits), candidate `path`s and `requires`, and the map (only when it is sent);
   - that `attempts` and `failed_links` already failed, and must not be repeated;
-  - when to give waypoints (platform ids preferred; each reachable from the one before);
+  - **what finishes a level:** the trophy, then the door; loot only adds score, so it is chosen only on or next to the way, and with no known way to the trophy Dave explores instead; a goal that `requires` an item comes after that item;
+  - **fuel:** it is limited and the trophy or the door may need a flight later, so goals and waypoints walk or jump whenever a `path` does, and plan a flight only when nothing else is known (fuel above `player.fuel.reserve` is free);
+  - when to give waypoints (platform ids only, from a candidate's `path` or from `exits`; each reachable from the one before);
   - the output format.
 
   It asks for a brief rationale, not step-by-step reasoning. The user message is the `PlanningRequest` as JSON.
-- **Output:** `response_format` is a strict `json_schema`: `goal` is an enum of the offered ids, and `waypoints` is an array of platform ids or integer pairs (`anyOf`; empty when not needed). `reasoning_effort: low`, `max_completion_tokens: 2000`.
+- **The map is not sent** (`models.planner.send_map: false`, `configs/models.yaml`) when the request has platforms: `body()` drops `map` from the user message and the prompt's map sentence (`system_prompt(send_map)`). The LLM misread walls on the grid; the platforms carry the same cells. The recorded request (`request_payload`, inspector bundles, viewers) keeps the map. Without platforms (no reach envelope) the map is always sent.
+- **Output:** `response_format` is a strict `json_schema`: `goal` is an enum of the offered ids, and `waypoints` is an array of platform id strings (empty when not needed). A tile waypoint beyond a pillar once drove 77 of 110 decisions of back-and-forth walking (`docs/progress.md`).
+- **Effort:** `reasoning_effort: low`; on `stuck` or `repeated_failures` triggers `models.planner.reasoning_effort_stuck` (`medium`) instead. `max_completion_tokens: 4000` leaves room for it. Both are in the run's recorded planner settings.
 - **Transport retries:** timeouts, 408, 429 and 5xx are retried with exponential backoff up to `models.max_retries`. 4xx responses are not retried, and their messages are redacted.
 - **Logging:** usage tokens (prompt, completion, reasoning) are recorded. `cost_usd` stays null, because no price table is assumed. The `request_ref` is a hash of the body, and the `response_ref` is the response id.
 - **Verified 2026-10-03:** `gpt-5.4-mini`, api-version `2024-12-01-preview`. The strict schema and `reasoning_effort` are accepted, and a call takes about 1.3–1.6 s with about 600–1000 prompt tokens. The sanitized response is `tests/fixtures/azure/planner_response.json` (`scripts/probe_azure.py`).

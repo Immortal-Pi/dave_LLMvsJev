@@ -22,7 +22,8 @@ export function PlannerPanel({ live }: { live: LiveState }) {
   const tried = plan.tried ?? [];
   const failed = plan.failed_links ?? [];
   const route = plan.route as { status?: string; steps?: number; reason?: string; incidents?: { cause: string; tile: number[] }[] } | null;
-  const who = plan.calls[0]?.provider === "mock" ? "Rule planner (mock)" : plan.fallback ? "Fallback" : "LLM planner";
+  const who = plan.planner === "rule" ? "Rule priority (no call)"
+    : plan.calls[0]?.provider === "mock" ? "Rule planner (mock)" : plan.fallback ? "Fallback" : "LLM planner";
   return (
     <section className="panel planner">
       <h2>

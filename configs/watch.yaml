@@ -26,6 +26,8 @@ planning:
   goal_timeout_frames: 480       # goal expiry; fixture scale, tune for Dave
   recent_events: 8               # recent skills shown to the planner
   nearest_collectibles: 3        # loot/gems offered as collect goals (trophy and items always)
+  llm_calls: escalate            # rule priority by default; the LLM planner on stuck, failures, death, rule loops
+  rule_repeat_limit: 2           # the rule's choice failed this often on the level: ask the LLM
 tactical:
   max_calls_per_episode: 1000     # tactical model calls, retries included
   max_tokens_per_episode: 3000000

@@ -107,7 +107,9 @@ def schedule(spec: BenchmarkSpec, base_seed: int, randomize: bool) -> list[dict[
 def prompt_hashes() -> dict[str, str]:
     """Hashes of every model-facing text, so a prompt change shows in the manifest."""
     return {"game_rules": _sha(GAME_RULES), "input_guide": _sha(INPUT_GUIDE), "tactical_task": _sha(TACTICAL_TASK),
-            "azure_planner_system": _sha(azure.SYSTEM_PROMPT), "azure_tactical_system": _sha(azure.TACTICAL_PROMPT),
+            "azure_planner_system": _sha(azure.SYSTEM_PROMPT),
+            "azure_planner_system_no_map": _sha(azure.system_prompt(send_map=False)),
+            "azure_tactical_system": _sha(azure.TACTICAL_PROMPT),
             "jev_request_source": _sha(inspect.getsource(jev.JevTacticalModel.body))}
 
 

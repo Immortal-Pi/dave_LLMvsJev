@@ -33,7 +33,8 @@ def azure_planner(config: AppConfig) -> AzurePlanner:
     cfg = config.models.planner
     client = AzureChatClient(AzureSettings.from_env(cfg.deployment_env), config.models.timeout_seconds,
                              config.models.max_retries)
-    return AzurePlanner(client, cfg.max_completion_tokens, cfg.reasoning_effort, cfg.price)
+    return AzurePlanner(client, cfg.max_completion_tokens, cfg.reasoning_effort, cfg.price,
+                        send_map=cfg.send_map, stuck_effort=cfg.reasoning_effort_stuck)
 
 
 def azure_tactical(config: AppConfig) -> AzureTacticalModel:

@@ -38,6 +38,7 @@ GAME_RULES = """Game rules (verified):
 - The level is completed by touching the door while holding the trophy. Touching the door without the trophy does nothing.
 - Fire, water and vines set Dave burning; touching a monster or its plasma does too. Burning ends in death, then Dave respawns at the level start. The game is over at 0 lives.
 - Loot (gems etc.) only adds score. The gun lets Dave shoot monsters: a monster hit by his bullet burns and is gone for the rest of the level (it stays gone after Dave dies), and its plasma stops. Killing a monster that guards the way makes the moves past it safe. Falling off the bottom of the screen wraps to the top; it is not a death.
+- The jetpack (900 fuel a pickup) lets Dave fly where walks and jumps cannot reach. While it is on, every tick burns one fuel, hovering too; at 0 it switches off and Dave falls.
 - Coordinates are tile (col, row); row 0 is the top. Only the local view and what was seen earlier this episode are known."""
 INPUT_GUIDE = f"""- `player`: Dave's tile, pixel position (16 px per tile), movement state, facing and velocity.
 - `view.rows`: the visible tiles, one string per row starting at tile `view.origin` (col, row). Legend: {GRID_LEGEND}.
@@ -49,7 +50,9 @@ TACTICAL_TASK = ("Choose the skill that best moves Dave toward the waypoint with
                  "plasma. A candidate whose description starts with `route:` carries out the next move of the "
                  "planned route (or walks to its take-off): prefer it unless it is dangerous. Avoid repeating a "
                  "skill that keeps failing. If a monster or its shots block the way and a shoot option says it hits, "
-                 "shooting first is usually the fastest safe way on.")
+                 "shooting first is usually the fastest safe way on. Jetpack fuel is limited and may be needed "
+                 "later in the level: turn the jetpack on only when a `route:` note says so, and once the route "
+                 "says to land, turn it off rather than hover.")
 
 
 class TacticalRequest(Contract):

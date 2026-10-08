@@ -31,6 +31,8 @@ planning:
   goal_timeout_frames: 1200      # ~2x the whole scripted level-1 route (fixture: 480)
   recent_events: 8
   nearest_collectibles: 3
+  llm_calls: escalate            # rule priority by default; the LLM planner on stuck, failures, death, rule loops
+  rule_repeat_limit: 2           # the rule's choice failed this often on the level: ask the LLM
 tactical:
   max_calls_per_episode: 400     # ~100 decisions per 3600 frames at ~37 frames/skill, x2 retries, x2 slack
   max_tokens_per_episode: 1000000

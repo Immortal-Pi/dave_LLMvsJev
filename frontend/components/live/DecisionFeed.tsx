@@ -133,7 +133,8 @@ function DecisionCard({ d, outcome, who }: { d: DecisionEvent; outcome: OutcomeE
 }
 
 function PlanCard({ p }: { p: PlanEvent }) {
-  const planner = p.calls[0] ? `${p.calls[0].provider === "mock" ? "Rule planner (mock)" : "LLM planner"}` : "Planner";
+  const planner = p.planner === "rule" ? "Rule priority"
+    : p.calls[0] ? `${p.calls[0].provider === "mock" ? "Rule planner (mock)" : "LLM planner"}` : "Planner";
   return (
     <article className="card plan-card">
       <header>
