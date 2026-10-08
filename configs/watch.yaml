@@ -27,8 +27,8 @@ planning:
   recent_events: 8               # recent skills shown to the planner
   nearest_collectibles: 3        # loot/gems offered as collect goals (trophy and items always)
 tactical:
-  max_calls_per_episode: 400     # tactical model calls, retries included
-  max_tokens_per_episode: 1000000
+  max_calls_per_episode: 1000     # tactical model calls, retries included
+  max_tokens_per_episode: 3000000
   max_cost_usd_per_episode: null # no price table assumed; set when the provider reports cost
   on_budget_exhausted: terminate # or: fallback
   fallback_skills: [wait_short, wait]   # dave, fixture; else the first offered candidate

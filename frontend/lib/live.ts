@@ -107,10 +107,23 @@ export type PlanEvent = {
   deaths?: { cause: string; tile: Tile | null }[];
 };
 
+/** The live graph's score of one option (graph arms; control/move_score.py): ``q`` is the cost
+ * to the goal after it (lower is better), ``regret`` how much worse than the best option. */
+export type MoveScore = {
+  q: number | null;
+  regret: number | null;
+  best: boolean;
+  p_ok: number;
+  attempts: number;
+  fatal: number;
+  land: string | null;
+  mode: "goal" | "explore";
+};
+
 export type DecisionEvent = ObsView & {
   observation_id: number;
   goal: { target: string; type: string; waypoint: Tile | null } | null;
-  candidates: { id: string; skill: string; description: string }[];
+  candidates: { id: string; skill: string; description: string; score?: MoveScore | null }[];
   screened: Record<string, string>;
   chosen: string;
   forced: boolean;

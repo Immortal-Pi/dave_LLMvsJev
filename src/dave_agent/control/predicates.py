@@ -60,6 +60,14 @@ def facing_side(obs: Observation) -> bool:
     return obs.facing in ("left", "right")
 
 
+def facing_left(obs: Observation) -> bool:
+    return obs.facing == "left"
+
+
+def facing_right(obs: Observation) -> bool:
+    return obs.facing == "right"
+
+
 def no_bullet(obs: Observation) -> bool:
     """deadly-dave allows one bullet at a time; bullets die at the screen edge, so a
     live bullet is always inside the observed viewport."""
@@ -94,6 +102,8 @@ PREDICATES: dict[str, Predicate] = {
     "landed": landed,
     "has_gun": has_gun,
     "facing_side": facing_side,
+    "facing_left": facing_left,
+    "facing_right": facing_right,
     "no_bullet": no_bullet,
     "screen_still": screen_still,
     "jetpacking": jetpacking,

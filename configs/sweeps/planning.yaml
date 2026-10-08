@@ -1,0 +1,4 @@
+# Grid A (docs/benchmark.md "Sweep"): goal timing, the same for every arm.
+planning.goal_timeout_frames: [600, 1200, 2400]
+planning.no_progress_frames: [160, 240, 400]
+planning.min_frames_between_calls: [75, 150, 300]

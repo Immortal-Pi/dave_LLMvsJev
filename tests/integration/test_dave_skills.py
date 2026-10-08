@@ -105,3 +105,11 @@ def test_shoot_masked_without_gun_then_fires_one_bullet(dave, catalog, config):
         assert bullets[0].position.x == start.player_position.x + 8
         assert generate_candidates(catalog, buttons, run.observation).masked["shoot"] == "no_bullet"
     assert results[0] == results[1]
+    # Turn and shoot: one walk tick turns him and steps him 2 px, then the bullet flies left.
+    start = dave.load_snapshot(snap)
+    assert "shoot_left" in {c.skill for c in generate_candidates(catalog, buttons, start).candidates}
+    run = _run(dave, catalog, config, start, "shoot_left")
+    bullets = [e for e in run.observation.entities if e.entity_type == "bullet"]
+    assert run.outcome == "completed" and run.observation.facing == "left" and len(bullets) == 1
+    assert 0 < start.player_position.x - run.observation.player_position.x <= 2
+    assert bullets[0].position.x < run.observation.player_position.x

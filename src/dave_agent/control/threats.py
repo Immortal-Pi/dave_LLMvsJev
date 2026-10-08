@@ -351,7 +351,30 @@ def safe_window(obs: Observation, reach: ReachMap, spec: SkillSpec, cfg: ThreatC
 
 
 def _moves(spec: SkillSpec) -> bool:
-    return bool(spec.buttons & {"left", "right", "jump"})
+    """A skill that takes Dave somewhere: a turn-and-shoot only steps him 2 px."""
+    return bool(spec.buttons & {"left", "right", "jump"}) and "fire" not in spec.buttons
+
+
+def aim(spec: SkillSpec) -> tuple[int | None, int]:
+    """(side the bullet flies, Dave's x shift before it is fired) for a shooting skill: a
+    turn-and-shoot (shoot_left, shoot_right) turns first with one walk tick, a 2 px step (dave.c
+    dave_state_walking_enter); plain ``shoot`` fires the way Dave faces (None)."""
+    for key, side in FACING.items():
+        if key in spec.buttons:
+            return side, 2 * side
+    return None, 0
+
+
+def shot_hits(obs: Observation, cells: dict[tuple[int, int], str], candidates: list[SkillCandidate],
+              specs: dict[str, SkillSpec], found: list[Threat] | None = None
+              ) -> dict[str, tuple[str, tuple[str, int] | None]]:
+    """``shot`` for every shooting candidate (its note, and the monster hit with the tick), with
+    Dave armed; empty otherwise."""
+    if obs.player_position is None or not (obs.inventory and obs.inventory.get("gun")):
+        return {}
+    found = threats(obs) if found is None else found
+    return {c.candidate_id: shot(obs, cells, found, *aim(specs[c.skill]))
+            for c in candidates if "fire" in specs[c.skill].buttons}
 
 
 def _blocks(contact: Contact | None) -> bool:
@@ -381,12 +404,10 @@ def assess_timing(obs: Observation, reach: ReachMap, candidates: list[SkillCandi
         return {}, {}
     found = threats(obs)
     opened = reach.opened()
-    armed = bool(obs.inventory and obs.inventory.get("gun"))
-    note, hit = shot(obs, reach.cells, found) if armed else ("", None)
-    fires = [c.candidate_id for c in candidates if armed and "fire" in specs[c.skill].buttons]
+    shots = shot_hits(obs, reach.cells, candidates, specs, found)
     # A shot that hits a monster stops it firing again: the shooting skill is judged without it.
-    kills = {cid: dict([hit]) for cid in fires if hit is not None}
-    notes: dict[str, str] = {cid: note for cid in fires}
+    kills = {cid: dict([hit]) for cid, (_, hit) in shots.items() if hit is not None}
+    notes: dict[str, str] = {cid: note for cid, (note, _) in shots.items()}
     if flying:
         # With the jetpack on Dave hovers: each skill's keys move him 1 px a tick, the jetpack
         # key drops him (control/reach.py trace_flying).
@@ -497,27 +518,30 @@ def shot_note(obs: Observation, cells: dict[tuple[int, int], str], found: list[T
     return shot(obs, cells, found)[0]
 
 
-def shot(obs: Observation, cells: dict[tuple[int, int], str],
-         found: list[Threat]) -> tuple[str, tuple[str, int] | None]:
+def shot(obs: Observation, cells: dict[tuple[int, int], str], found: list[Threat],
+         side: int | None = None, shift: int = 0) -> tuple[str, tuple[str, int] | None]:
     """(note, (monster id, tick it is hit) or None) for Dave's bullet fired now: the first monster
     it hits (by the monsters' predicted motion), or a miss and why. The bullet stops at a brick
     (bullet.c tests x+10 going right, x-2 going left, at y+1) or at the screen's edge. It passes
-    through plasma (game.c tests bullets against monsters only)."""
+    through plasma (game.c tests bullets against monsters only). ``side`` (1 right, -1 left) and
+    ``shift`` (px) are for a turn-and-shoot: it fires that way after stepping ``shift``."""
     pos = obs.player_position
     assert pos is not None
-    side = FACING.get(obs.facing or "", 0)
+    turned = side is not None
+    side = side if turned else FACING.get(obs.facing or "", 0)
     if not side:
         return "shot: facing neither way", None
     monsters = [t for t in found if t.entity_type != "plasma"]
     if not monsters:
         return "shot: no monster in sight", None
     if all((t.x - pos.x) * side < 0 for t in monsters):
-        return "shot: facing away from the " + ", ".join(sorted({t.entity_type for t in monsters})), None
+        away = "aims away" if turned else "facing away"
+        return f"shot: {away} from the " + ", ".join(sorted({t.entity_type for t in monsters})), None
     left = obs.region.min.col * TILE
     zone = deadzone(obs)
     tracks = {t.entity_id: (simulate(t, [pos.x], 200, cells, zone).monster if t.motion is not None
                             else positions(t, 200, cells)) for t in monsters}
-    bx, by = pos.x + 8 * side, pos.y + 8
+    bx, by = pos.x + shift + 8 * side, pos.y + 8
     for tick in range(1, 201):
         bx += BULLET_SPEED * side
         if bx >= left + SCREEN_PX or bx <= left:

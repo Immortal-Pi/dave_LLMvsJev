@@ -84,6 +84,20 @@ Each level's graph is a NetworkX `MultiDiGraph`. It is used only by graph-enable
 
 `RouteTracker` follows a route at decision boundaries only. It returns a replan reason in this order: `target_reached`, `edge_failed`, `inventory_changed`, `topology_changed` (when `topology_version` changed, i.e. a node or edge was added or merged), or `off_route`.
 
+## Live move scores (`control/move_score.py`)
+
+While Dave plays, every option of a decision is scored from the **live** graph, the one learning this episode, so a move that just failed scores worse at the next decision. Graph-enabled arms only; the score informs and nothing is masked or reordered.
+
+- **Position value `V(p)`:** the cost of the best way from platform `p` to the goal's target, choosing the best move at every step. One reverse Dijkstra from the target over the route costs above (time, risk, uncertainty, goal credit), so `V(here)` equals `find_route(here → target).cost`. With no reachable target, or an exit without the trophy, it is the cost to the nearest platform with an unexplored side (`explore`).
+- **Option value `Q(here, a)`:** the cost of doing `a` plus `V` of where it ends.
+  - A tried move ends where its edges most often landed; its cost is `edge_cost` of its outcomes from here with the held items (edges and unattributed failures summed).
+  - An untried move ends at the reach estimate's end cell (`estimate_end_at`); its cost adds the skill's frame cap as time. No safe landing, or a landing off the mapped platforms, gives no `Q`.
+  - An action that stays (shoot, `wait*`, a move that ends on the same platform) costs its time and its death risk, plus `V(here)`. A shot predicted to hit a monster (`threats.shot_hits`) is cheaper by the whole `graph.kill_bonus` (0.5, not calibrated). Any other shot from a platform where shots killed a monster before is cheaper by `kill_bonus` times the kill rate. Kills are recorded on the start node as `shots` and `kills` (a monster at the shot's start missing at its end; optional attributes).
+  - On the target's platform, the walk to the goal tile is added (24 frames per tile), so walking toward the item beats walking away.
+- **Regret** `Q − min Q`: 0 for the best option from this position.
+- **Note** (first after the leading danger and route notes, at most 60 characters): `score: best (2.1 to goal; ok 4/5)`, `score: +1.3 vs best (ok 1/4, died 3)`, `score: ? (no safe landing; untried)`.
+- The live viewer shows a `best` / `+regret` badge on each option and, on the card, whether the model picked the graph's best (`docs/live.md`).
+
 ## Checkpoints
 
 - **Store layout:** a store is a directory with one checkpoint per level, `<dir>/<level_id>.json`. A store path written `X.json` means the directory `X/`. A legacy combined checkpoint at `X.json` (one graph for all levels) is split by node `level_id` on load: edges are kept only between nodes of the same level. It is then written back as the directory, so earlier learning is kept.

@@ -39,6 +39,12 @@ def edge_key(skill: str, context: tuple[str, ...]) -> str:
     return f"{skill}|{','.join(context)}"
 
 
+def shot_killed(start: Observation, end: Observation) -> bool:
+    """A monster seen at the shot's start is gone at its end (Dave's bullet and plasma excluded)."""
+    monsters = {e.entity_id for e in start.entities if e.visible and e.entity_type not in ("bullet", "plasma")}
+    return bool(monsters - {e.entity_id for e in end.entities})
+
+
 def segments(obs: Observation) -> list[dict[str, Any]]:
     """Standable runs in one observation, ordered by row then column."""
     kinds: dict[tuple[int, int], str] = {(t.pos.col, t.pos.row): t.kind for t in obs.tiles}
@@ -162,6 +168,9 @@ class WorldGraph:
             self._add_failure_record(a["failed_attempts"], key, rec["attempts"], rec["fatal"], rec["evidence"])
         self._add_evidence(a, b["evidence"], b["evidence_count"])
         a["incidents"] = (a.get("incidents", []) + b.get("incidents", []))[-self.evidence_limit:]
+        for field in ("shots", "kills"):
+            if field in b:
+                a[field] = a.get(field, 0) + b[field]
         for key, rec in b.get("credit", {}).items():
             into = a.setdefault("credit", {}).setdefault(key, {"tries": 0, "closer": 0, "goals": 0, "reached": 0})
             for field in into:
@@ -227,6 +236,10 @@ class WorldGraph:
         self._add_evidence(self.g.nodes[source], [ref], 1)
         if fatal:
             self._add_incident(self.g.nodes[source], run, ref, predicted_safe)
+        if run.skill in ("shoot", "shoot_left", "shoot_right"):  # live move scores (control/move_score.py) credit shots that kill
+            node = self.g.nodes[source]
+            node["shots"] = node.get("shots", 0) + 1
+            node["kills"] = node.get("kills", 0) + int(shot_killed(start, run.observation))
 
         if run.outcome == "completed":
             target = self.locate(run.observation)

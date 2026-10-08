@@ -297,7 +297,8 @@ def run_episode(
                     result.events.extend(events)
                     if recorder is not None:
                         recorder.record_planning(list(calls), events)
-                    emit("decision", {**_decision_view(observation, memory, candidates, screened, decision, calls),
+                    emit("decision", {**_decision_view(observation, memory, candidates, screened, decision, calls,
+                                                        goals.scores if goals is not None else {}),
                                       **wait, "stale": stale})
                     observation = latest
                     result.observation_ids.append(observation.observation_id)
@@ -308,7 +309,8 @@ def run_episode(
                                     payload={**wait, "candidate_id": decision.candidate_id}))
                 candidate, start = fresh, latest
             result.decisions.append(decision)
-            emit("decision", {**_decision_view(observation, memory, candidates, screened, decision, calls), **wait})
+            emit("decision", {**_decision_view(observation, memory, candidates, screened, decision, calls,
+                                                        goals.scores if goals is not None else {}), **wait})
             run = execute(adapter, candidate, skills, start, executor)
             if run.outcome == "rejected":
                 # Candidates were generated from this observation, so this indicates a bug.
@@ -496,7 +498,10 @@ def _threat_view(obs) -> list[dict[str, Any]]:
 
 
 def _decision_view(obs, memory: WorkingMemory, candidates, screened: dict[str, str], decision,
-                   calls) -> dict[str, Any]:
+                   calls, scores: dict | None = None) -> dict[str, Any]:
+    """``scores``: the goal manager's live move scores (graph arms; none for a forced decision,
+    where no options were annotated)."""
+    scores = {} if decision.forced or scores is None else scores
     tactical = [c for c in calls if c.purpose == "tactical"]
     probabilities = next((c.output.get("probabilities") for c in reversed(tactical)
                           if c.output and c.output.get("probabilities")), None)
@@ -506,7 +511,8 @@ def _decision_view(obs, memory: WorkingMemory, candidates, screened: dict[str, s
                 "target": goal.target_ref, "type": goal.goal_type,
                 "waypoint": None if goal.next_waypoint is None else [goal.next_waypoint.col,
                                                                      goal.next_waypoint.row]},
-            "candidates": [{"id": c.candidate_id, "skill": c.skill, "description": c.description}
+            "candidates": [{"id": c.candidate_id, "skill": c.skill, "description": c.description,
+                            "score": scores[c.candidate_id].view() if c.candidate_id in scores else None}
                            for c in candidates],
             "screened": screened, "chosen": decision.candidate_id, "forced": decision.forced,
             "fallback": decision.fallback, "fallback_reason": decision.fallback_reason,

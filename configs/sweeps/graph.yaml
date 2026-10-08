@@ -1,0 +1,5 @@
+# Grid B (docs/benchmark.md "Sweep"): learned-route cost, arm C only; run with --graph warm.
+graph.weights.risk: [0.5, 1.0, 2.0]
+graph.weights.uncertainty: [0.0, 0.5, 1.0]
+graph.credit_penalty: [0.5, 1.0, 2.0]
+graph.credit_bonus: [0.25, 0.5, 0.75]

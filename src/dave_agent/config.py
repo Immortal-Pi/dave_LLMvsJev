@@ -210,6 +210,9 @@ class GraphConfig(Strict):
     # for that target that used the move from that platform and were achieved.
     credit_bonus: Annotated[float, Field(ge=0, lt=1)] = 0.5
     credit_penalty: Annotated[float, Field(ge=0)] = 1.0
+    # Live move scores (control/move_score.py): a shot's cost is lowered by kill_bonus times the
+    # share of past shots from that platform that killed a monster.
+    kill_bonus: Annotated[float, Field(ge=0)] = 0.5
 
     @model_validator(mode="after")
     def _clip_ordered(self) -> GraphConfig:

@@ -7,6 +7,7 @@ import {
   type DecisionEvent,
   type FeedItem,
   type LiveState,
+  type MoveScore,
   type OutcomeEvent,
   type PlanEvent,
 } from "@/lib/live";
@@ -21,6 +22,21 @@ function danger(description: string): string | null {
 function route(description: string): string | null {
   const m = description.match(/(?:^|; )route: ([^;]+)/);
   return m ? m[1] : null;
+}
+
+/** The live graph's score: the best option from here, or how much worse than it (cost units). */
+function Score({ s }: { s: MoveScore | null | undefined }) {
+  if (!s) return null;
+  const tried = s.attempts ? `ok ${Math.round(s.p_ok * 100)}% over ${s.attempts} tries${s.fatal ? `, ${s.fatal} fatal` : ""}` : "untried";
+  if (s.q === null) {
+    return <span className="badge" title={`no known way to the ${s.mode} after it; ${tried}`}>score ?</span>;
+  }
+  const title = `cost to the ${s.mode} after this option: ${s.q.toFixed(2)}; ${tried}`;
+  return s.best ? (
+    <span className="badge ok" title={title}>best</span>
+  ) : (
+    <span className="badge" title={title}>+{(s.regret ?? 0).toFixed(1)}</span>
+  );
 }
 
 function Outcome({ o }: { o: OutcomeEvent | null }) {
@@ -44,6 +60,8 @@ function DecisionCard({ d, outcome, who }: { d: DecisionEvent; outcome: OutcomeE
   const latency = d.calls.reduce((sum, c) => sum + (c.latency_ms ?? 0), 0);
   const how = d.forced ? "had one option:" : d.fallback ? `fell back (${d.fallback_reason}) to` : "chose";
   const onRoute = d.candidates.filter((c) => route(c.description)).map((c) => c.id);
+  const scored = d.candidates.some((c) => c.score && c.score.q !== null);
+  const chosenScore = chosen?.score;
   return (
     <article className="card decision-card">
       <header>
@@ -67,6 +85,15 @@ function DecisionCard({ d, outcome, who }: { d: DecisionEvent; outcome: OutcomeE
             <span className="badge warn" title="a skill marked route: was offered but not chosen">off route</span>
           )
         ) : null}
+        {scored && chosenScore && chosenScore.q !== null ? (
+          chosenScore.best ? (
+            <span className="badge ok" title="the live graph scores this the best option from here">graph's best</span>
+          ) : (
+            <span className="badge warn" title="the live graph scores another option better from here">
+              +{(chosenScore.regret ?? 0).toFixed(1)} vs graph's best
+            </span>
+          )
+        ) : null}
       </header>
       {d.goal ? (
         <div className="small muted">
@@ -84,6 +111,7 @@ function DecisionCard({ d, outcome, who }: { d: DecisionEvent; outcome: OutcomeE
                 {probs ? <ProbabilityBar value={probs[c.id]} highlight={c.id === d.chosen} /> : null}
                 {warn ? <span className="badge warn">{warn}</span> : null}
                 {step ? <span className="badge route" title={step}>route</span> : null}
+                <Score s={c.score} />
               </li>
             );
           })}
