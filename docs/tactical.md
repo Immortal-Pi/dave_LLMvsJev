@@ -26,7 +26,9 @@ The tactical controller chooses **how** to pursue the planner's goal: one bounde
 
 There are no tools, no free-form planning and no growing transcript: each call sees one request.
 
-The provider-neutral text lives in `models/tactical.py` and is sent to every provider: `GAME_RULES` (shared with the planner), `INPUT_GUIDE` (what each field means, including the grid legend) and `TACTICAL_TASK`.
+The provider-neutral text lives in `models/tactical.py` and is sent to every provider: `GAME_RULES` (shared with the planner), `INPUT_GUIDE` (what each field means, including the grid legend) and `TACTICAL_TASK`. The rules say what a kill does: a monster hit by Dave's bullet burns, stays dead for the rest of the level (deaths included) and fires no more, so killing one that guards the way makes the moves past it safe. The task adds that when a monster or its shots block the way and a shoot option says it hits, shooting first is usually the fastest safe way on. The `route: shoot` note (`docs/skills.md`, "A kill that clears the way") marks those options.
+
+**Jetpack fuel.** The rules state the jetpack's verified behavior (900 fuel a pickup; while on, every tick burns one fuel, hovering too; at 0 it switches off). The task says fuel is limited and may be needed later in the level: turn the jetpack on only when a `route:` note says so, and once the route says to land, turn it off rather than hover. Standing with fuel, a `jetpack_on` option with no `route:` note gets `uses fuel (N left): not needed for the planned route` (`docs/planner.md`, "Saving fuel"). The note informs only.
 
 **Context digest.** `context_digest(request)` is a sha256 prefix of the canonical request JSON, without the episode id. `ModelController` puts it on every decision (`Decision.context_digest`, stored in `decisions.context_digest`; NULL for forced decisions). Two arms with equal digests at a decision were shown identical context. This is how A/B/C parity shows in the logs (tested in `test_arm_parity.py`).
 

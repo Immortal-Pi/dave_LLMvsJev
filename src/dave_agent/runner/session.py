@@ -33,7 +33,8 @@ def azure_planner(config: AppConfig) -> AzurePlanner:
     cfg = config.models.planner
     client = AzureChatClient(AzureSettings.from_env(cfg.deployment_env), config.models.timeout_seconds,
                              config.models.max_retries)
-    return AzurePlanner(client, cfg.max_completion_tokens, cfg.reasoning_effort, cfg.price)
+    return AzurePlanner(client, cfg.max_completion_tokens, cfg.reasoning_effort, cfg.price,
+                        send_map=cfg.send_map, stuck_effort=cfg.reasoning_effort_stuck)
 
 
 def azure_tactical(config: AppConfig) -> AzureTacticalModel:
@@ -118,20 +119,30 @@ def budget_notice(config: AppConfig, mode: str) -> dict:
         "max_episode_wall_seconds": config.benchmark.max_episode_wall_seconds}}
 
 
+def graph_store_path(base: Path, arm_name: str, adapter_name: str, execution_mode: str) -> Path:
+    """An arm's default graph store under ``base``: ``graphs/arm-<ARM>/<adapter>`` for paused
+    play, ``graphs/arm-<ARM>/<adapter>-realtime`` when the game runs on while models think (the
+    two learn different outcomes and timing, so they never share a store)."""
+    suffix = "-realtime" if execution_mode == "real_time" else ""
+    return Path(base) / "graphs" / f"arm-{arm_name}" / f"{adapter_name}{suffix}.json"
+
+
 def open_graph(config: AppConfig, arm_name: str, adapter: GameAdapter, adapter_name: str,
                path: Path | None = None) -> tuple[GraphStore | None, Path | None, bool]:
     """(store, store directory, learn) for ``play`` and ``live``: a graph arm loads or creates its
-    own store (``path``, else ``memory.graph_checkpoint``, else ``graphs/arm-<ARM>/<adapter>``
-    next to the episode store; a legacy ``X.json`` is split by level), so no route knowledge
-    leaks between arms. Other arms get (None, None, False)."""
+    own store (``path``, else ``memory.graph_checkpoint``, else ``graph_store_path`` next to the
+    episode store, per execution mode; a legacy ``X.json`` is split by level), so no route
+    knowledge leaks between arms or between paused and real-time play. A store learned in the
+    other execution mode is refused. Other arms get (None, None, False)."""
     if not config.arms[arm_name].graph_enabled:
         return None, None, False
+    mode = config.environment.execution_mode
     path = (path or config.memory.graph_checkpoint
-            or config.memory.episode_store.parent / "graphs" / f"arm-{arm_name}" / f"{adapter_name}.json")
+            or graph_store_path(config.memory.episode_store.parent, arm_name, adapter_name, mode))
     caps = adapter.capabilities()
     policy = config.environment.observation_policy
-    graph = (load_store(path, caps.adapter, caps.build_id, policy) if store_exists(path)
-             else GraphStore(caps.adapter, caps.build_id, policy, config.graph.evidence_per_item))
+    graph = (load_store(path, caps.adapter, caps.build_id, policy, mode) if store_exists(path)
+             else GraphStore(caps.adapter, caps.build_id, policy, config.graph.evidence_per_item, mode))
     return graph, store_dir(path), config.memory.graph_updates
 
 
@@ -171,6 +182,7 @@ def run_trial(config: AppConfig, arm_name: str, models: Models, adapter: GameAda
             max_wall_seconds=config.benchmark.max_episode_wall_seconds,
             evidence=use_graph,  # "past runs" notes, also from a frozen warm checkpoint
             on_event=on_event,  # the live viewer (runner/live.py); write-only
+            realtime=config.environment.execution_mode == "real_time",
         )
     except BaseException as exc:
         exc.episode_recorder = recorder  # callers of an interrupted run still know its episode key

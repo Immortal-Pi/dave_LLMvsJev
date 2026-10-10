@@ -554,6 +554,14 @@ main:has(.live) {
   font-size: 0.8rem;
   color: var(--muted);
 }
+.live-controls label.check {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-height: 34px;
+  color: var(--text);
+  cursor: pointer;
+}
 .live-controls select,
 .live-controls button {
   font: inherit;

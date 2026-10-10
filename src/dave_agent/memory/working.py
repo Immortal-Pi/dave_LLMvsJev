@@ -198,6 +198,16 @@ class WorkingMemory:
         self.last_decision = decision
         self.latest = end
 
+    def advance(self, observations: list[Observation]) -> None:
+        """Real-time mode: the game ran on (no keys pressed) while a model decided. Moves
+        ``latest`` and the progress clock; no skill ran, so the history is unchanged."""
+        previous = self._require()
+        for obs in observations:
+            if self._progressed(previous, obs):
+                self._last_progress_frame = obs.frame
+            previous = obs
+        self.latest = previous
+
     def experience(self, tile: TilePos) -> dict[str, Experience]:
         """Per skill, what starting it from ``tile`` did earlier this episode (empty when untried)."""
         return dict(self._experience.get((tile.col, tile.row), {}))

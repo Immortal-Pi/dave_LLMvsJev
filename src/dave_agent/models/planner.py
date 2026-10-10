@@ -30,6 +30,9 @@ class GoalCandidate(Contract):
     # Estimated way there over the explored platforms (control/platforms.py), when the adapter
     # has a reach envelope: "c1r9 -jump right-> c4r7 ...", or why no path is known.
     path: str | None = None
+    # Items Dave must take first: no path is known without them (e.g. "jetpack": only a flight
+    # gets there and Dave has no fuel).
+    requires: tuple[str, ...] = ()
 
 
 class PlanningRequest(Contract):
@@ -123,9 +126,12 @@ def priority(candidate: GoalCandidate) -> int:
 
 def rule_choice(candidates: tuple[GoalCandidate, ...], avoid: str | None = None) -> GoalCandidate:
     """First candidate by priority, skipping ``avoid`` (a goal that just failed) when possible.
-    With path estimates (control/platforms.py), goals with a known path come first."""
+    With path estimates (control/platforms.py), goals with a known path come first. A pick that
+    ``requires`` an offered item gives way to that item (the jetpack before a flight-only trophy)."""
     ranked = sorted(candidates, key=lambda c: (bool(c.path and c.path.startswith("no known path")), priority(c)))
-    return next((c for c in ranked if c.candidate_id != avoid), ranked[0])
+    pick = next((c for c in ranked if c.candidate_id != avoid), ranked[0])
+    first = next((c for c in ranked if c.goal_type == "collect" and c.target_name in pick.requires), None)
+    return first or pick
 
 
 def _ok(provider: str, model: str) -> ModelCallRecord:

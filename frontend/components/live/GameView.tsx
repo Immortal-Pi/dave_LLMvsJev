@@ -59,7 +59,8 @@ export function GameView({ live }: { live: LiveState }) {
         )}
         {thinking ? (
           <div className="thinking">
-            {who} is choosing among {thinking.options} skills… <span className="muted">(game paused)</span>
+            {who} is choosing among {thinking.options} skills…{" "}
+            <span className="muted">{live.run?.pause === false ? "(game running, Dave stands still)" : "(game paused)"}</span>
           </div>
         ) : null}
         {live.finished ? <div className="thinking done">{live.finished.outcome}</div> : null}

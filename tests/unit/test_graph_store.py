@@ -132,3 +132,46 @@ def test_view_is_json_ready_and_reads_only():
     (_, _, data), = graph.g.edges(data=True)
     assert edge["skill"] == "jump_right" and edge["attempts"] == 1
     assert edge["p"] == round(success_probability(data), 3)
+
+
+# -- paused and real-time play learn separately -------------------------------------------------
+def test_a_store_keeps_its_execution_mode(tmp_path):
+    realtime = GraphStore("fixture", "test", "local_observed", execution_mode="real_time")
+    realtime.record_execution(obs(player=(3, 3)), run("jump_right", obs(player=(6, 1), oid=2)), "r#1")
+    assert realtime.for_level("L1").execution_mode == "real_time"
+    directory = save_store(realtime, tmp_path / "rt.json")
+    assert json.loads((directory / "L1.json").read_text(encoding="utf-8"))["execution_mode"] == "real_time"
+    assert load_store(directory, execution_mode="real_time").execution_mode == "real_time"
+    with pytest.raises(GraphCheckpointError, match="execution_mode is 'real_time' but this run uses 'paused_step'"):
+        load_store(directory, "fixture", "test", "local_observed", "paused_step")
+
+
+def test_a_checkpoint_from_before_the_field_is_paused(tmp_path):
+    directory = save_store(learned(), tmp_path / "old.json")
+    for file in directory.glob("*.json"):
+        data = json.loads(file.read_text(encoding="utf-8"))
+        del data["execution_mode"]
+        file.write_text(json.dumps(data), encoding="utf-8")
+    assert load_store(directory, execution_mode="paused_step").execution_mode == "paused_step"
+    with pytest.raises(GraphCheckpointError, match="execution_mode"):
+        load_store(directory, execution_mode="real_time")
+
+
+def test_paused_and_real_time_play_use_separate_stores(config, adapter, tmp_path):
+    from dave_agent.runner.session import graph_store_path, open_graph
+
+    assert graph_store_path(tmp_path, "C", "dave", "paused_step") == tmp_path / "graphs" / "arm-C" / "dave.json"
+    assert graph_store_path(tmp_path, "C", "dave", "real_time") == tmp_path / "graphs" / "arm-C" / "dave-realtime.json"
+    paused = config.model_copy(update={"memory": config.memory.model_copy(update={
+        "episode_store": tmp_path / "events.sqlite", "graph_checkpoint": None})})
+    realtime = paused.model_copy(update={"environment": paused.environment.model_copy(
+        update={"execution_mode": "real_time"})})
+    graph, directory, _ = open_graph(realtime, "C", adapter, "fixture")
+    assert directory == tmp_path / "graphs" / "arm-C" / "fixture-realtime" and graph.execution_mode == "real_time"
+    graph.observe(obs())
+    save_store(graph, directory)
+    graph, directory, _ = open_graph(paused, "C", adapter, "fixture")  # the paused store: still new and empty
+    assert directory == tmp_path / "graphs" / "arm-C" / "fixture" and graph.levels == {}
+    assert graph.execution_mode == "paused_step"
+    graph, _, _ = open_graph(realtime, "C", adapter, "fixture")  # the real-time store kept what it learned
+    assert sorted(graph.levels) == ["L1"]

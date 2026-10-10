@@ -4,7 +4,7 @@
 
 | Route | |
 | --- | --- |
-| ``POST /start`` | ``{scenario, arm, planner: mock|live, tactical: mock|live, seed?}``: start an episode |
+| ``POST /start`` | ``{scenario, arm, planner: mock|live, tactical: mock|live, seed?, pause?}``: start an episode (``pause: false``: the game runs on while models think) |
 | ``POST /stop`` | stop it at the next game tick (recorded as truncated / interrupted, like Ctrl-C) |
 | ``GET /events`` | Server-Sent Events: ``run``, ``episode``, ``plan``, ``goal``, ``deciding``, ``decision``, ``outcome``, ``summary``, ``notice``, ``error``, ``idle`` (the current run's events are replayed first, so a reload catches up) |
 | ``GET /frame`` | the latest game frame (BMP, 320x200 with the HUD) |
@@ -36,7 +36,8 @@ from dave_agent.adapters import create_adapter
 from dave_agent.config import AppConfig, ConfigError
 from dave_agent.memory.episodes import EpisodeStore
 from dave_agent.memory.persistence import save_store
-from dave_agent.runner.session import budget_notice, build_models, episode_summary, open_graph, run_trial
+from dave_agent.runner.session import budget_notice, build_models, episode_summary, graph_store_path, open_graph, \
+    run_trial
 
 log = logging.getLogger(__name__)
 
@@ -176,6 +177,12 @@ class LiveServer:
         arm = str(request.get("arm") or "B")
         planner, tactical = request.get("planner", "mock"), request.get("tactical", "mock")
         seed = int(request.get("seed", self.config.benchmark.seed))
+        pause = request.get("pause", True)
+        if not isinstance(pause, bool):
+            raise ConfigError("pause is true or false")
+        if not pause and self.tick_ms <= 0:
+            raise ConfigError("the game runs on while models think only at a paced speed; "
+                              "restart the server without --tick-ms 0")
         if scenario not in self.levels():
             raise ConfigError(f"unknown level {scenario!r}; choose one of {list(self.levels())}")
         if arm not in self.config.arms:
@@ -192,13 +199,17 @@ class LiveServer:
             self.run_id = f"live-{datetime.now(UTC):%Y%m%dT%H%M%S}-{uuid.uuid4().hex[:6]}"
             self._stop.clear()
             self.hub.reset()
+            # Pause off: real-time mode for this run only (recorded in the run's config).
+            config = self.config if pause else self.config.model_copy(update={
+                "environment": self.config.environment.model_copy(update={"execution_mode": "real_time"})})
             info = {"run_id": self.run_id, "scenario": scenario, "arm": arm, "seed": seed, "mode": models.mode,
+                    "pause": pause,
                     "planner": f"{models.planner.provider}:{models.planner.model}",
                     "tactical": models.controller.model, "arm_config": self.config.arms[arm].model_dump(mode="json")}
             self.hub.publish("run", info)
             if paid:
                 self.hub.publish("notice", budget_notice(self.config, models.mode))
-            self._thread = threading.Thread(target=self._run, args=(models, scenario, arm, seed), daemon=True,
+            self._thread = threading.Thread(target=self._run, args=(models, scenario, arm, seed, config), daemon=True,
                                             name=f"live-{self.run_id}")
             self._thread.start()
             return info
@@ -215,27 +226,30 @@ class LiveServer:
             self._thread.join(timeout=10)
 
     # -- the episode -----------------------------------------------------------------------------
-    def _run(self, models, scenario: str, arm: str, seed: int) -> None:
+    def _run(self, models, scenario: str, arm: str, seed: int, config: AppConfig | None = None) -> None:
+        config = config or self.config
         run_id = self.run_id
         assert run_id is not None
         adapter = None
         store = EpisodeStore(self.store_path)
         graph, graph_path, learn, recorder = None, None, False, None
         try:
-            adapter = self.adapter_factory(self.adapter_name, self.config.environment)
+            adapter = self.adapter_factory(self.adapter_name, config.environment)
             live = LiveAdapter(adapter, self.hub, self.tick_ms, self.frame_every, self._stop, self._frame_dir)
             # The arm's own store, next to the live episode store (by default the same place as
-            # play's: artifacts/graphs/arm-<ARM>/<adapter>/), unless memory.graph_checkpoint is set.
+            # play's: artifacts/graphs/arm-<ARM>/<adapter>/, or <adapter>-realtime/ with pause off),
+            # unless memory.graph_checkpoint is set.
             graph, graph_path, learn = open_graph(
-                self.config, arm, adapter, self.adapter_name,
-                self.config.memory.graph_checkpoint
-                or self.store_path.parent / "graphs" / f"arm-{arm}" / f"{self.adapter_name}.json")
+                config, arm, adapter, self.adapter_name,
+                config.memory.graph_checkpoint
+                or graph_store_path(self.store_path.parent, arm, self.adapter_name,
+                                    config.environment.execution_mode))
             def on_event(kind: str, data: dict[str, Any]) -> None:
                 if kind == "deciding":
-                    live.capture(data["frame"])  # the frame the models decide on (the game is paused)
+                    live.capture(data["frame"])  # the frame the models decide on
                 self.hub.publish(kind, data)
 
-            result, recorder = run_trial(self.config, arm, models, live, self.adapter_name, scenario, seed, store,
+            result, recorder = run_trial(config, arm, models, live, self.adapter_name, scenario, seed, store,
                                          run_id, "live", graph, learn, on_event=on_event)
             summary = episode_summary(result, mode=models.mode, run_id=run_id, episode_key=recorder.episode_key,
                                       store=store.path, arm=arm, models=models, graph=graph, graph_path=graph_path,

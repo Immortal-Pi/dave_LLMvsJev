@@ -19,12 +19,21 @@ The optional ``on_event`` callback receives a JSON-ready summary of each step as
 (``episode``, ``plan``, ``goal``, ``deciding``, ``decision``, ``outcome``, and ``graph`` on
 graph-enabled arms) for the live viewer
 (runner/live.py). It is write-only: nothing it does feeds back into decisions.
+Real-time mode (``realtime=True``, ``environment.execution_mode: real_time``; the live viewer's
+"pause while thinking" off): planner and tactical calls run on a worker thread while this
+thread keeps the game going, one tick at a time with no keys pressed (Dave stands still). After
+the wait the choice is checked against the latest observation: it is dropped
+(``decision_stale``) and decided again when Dave died, respawned or the episode ended during
+the wait, or the chosen skill is no longer legal or now screened out; otherwise that skill runs
+from the latest observation (``decision_latency`` records the wait). Real-time episodes depend
+on model latency, so they cannot be replayed exactly.
 """
 
 from __future__ import annotations
 
 import copy
 import logging
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -99,6 +108,7 @@ def run_episode(
     max_wall_seconds: float | None = None,
     evidence: GraphStore | None = None,
     on_event: Callable[[str, dict[str, Any]], None] | None = None,
+    realtime: bool = False,
 ) -> EpisodeResult:
     started = time.monotonic()
 
@@ -153,10 +163,55 @@ def run_episode(
         if step.record is not None:
             emit("plan", _plan_view(step))
 
+    def while_playing(fn: Callable[[], Any], start) -> tuple[Any, list]:
+        """``fn()``; in real-time mode on a worker thread while the game runs on with no keys
+        pressed. Returns its value and the steps taken meanwhile (none when paused)."""
+        if not realtime:
+            return fn(), []
+        box: dict[str, Any] = {}
+
+        def work() -> None:
+            try:
+                box["value"] = fn()
+            except BaseException as exc:  # re-raised on this thread
+                box["error"] = exc
+
+        worker = threading.Thread(target=work, daemon=True, name="dave-decide")
+        worker.start()
+        steps, latest = [], start
+        while worker.is_alive() and latest.terminal == "running":
+            step = adapter.step(frozenset(), 1)
+            steps.append(step)
+            latest = step.observation
+        worker.join()
+        if "error" in box:
+            raise box["error"]
+        return box["value"], steps
+
+    def absorb(steps) -> list[Event]:
+        """Fold the steps taken during a wait into memory, the graph and the goal manager."""
+        waited: list[Event] = []
+        for step in steps:
+            waited.extend(step.events)
+            waited.extend(detector.observe(step.observation))
+            if graph is not None:
+                graph.observe(step.observation)
+            if goals is not None:
+                goals.observe(step.observation)
+        if steps:
+            memory.advance([s.observation for s in steps])
+        return waited
+
+    pending: list[Event] = []  # events of a real-time wait, carried into the next decision's record
     stop: tuple[str, dict] | None = None  # (termination reason, truncation payload) for budget stops
     try:
         if goals is not None:
-            planned(goals.reset(observation, memory))
+            step, idle = while_playing(lambda: goals.reset(observation, memory), observation)
+            planned(step)
+            if idle:
+                pending.extend(absorb(idle))
+                observation = idle[-1].observation
+                result.observation_ids.append(observation.observation_id)
         shown = graph if graph is not None else past  # the graph the viewer draws (learning or frozen)
         if shown is not None and on_event is not None:
             emit("graph", _graph_view(shown, observation.level_id, graph is not None))
@@ -174,8 +229,12 @@ def run_episode(
             )
             candidates = list(offered.candidates)
             calls: tuple[ModelCallRecord, ...] = ()
-            events: list[Event] = []
+            events: list[Event] = pending
+            pending = []
             screened: dict[str, str] = {}
+            idle: list = []
+            start = observation  # where the skill runs from (later than the decision's in real time)
+            wait: dict[str, Any] = {}
             if len(candidates) == 1:
                 # Only one legal action (e.g. waiting out a burn): no model call, same for every arm.
                 decision = Decision(
@@ -201,7 +260,9 @@ def run_episode(
                                                      "kept": [c.candidate_id for c in candidates]}))
                 emit("deciding", {"frame": observation.frame, "options": len(candidates), "screened": screened})
                 try:
-                    decision, calls = controller.decide(observation, memory.goal, candidates, memory.context())
+                    context = memory.context()
+                    (decision, calls), idle = while_playing(
+                        lambda: controller.decide(observation, memory.goal, candidates, context), observation)
                 except BudgetExhausted as exc:
                     # Calls made for the interrupted decision are still logged.
                     result.model_calls.extend(exc.calls)
@@ -222,9 +283,35 @@ def run_episode(
                                         payload={"reason": decision.fallback_reason,
                                                  "candidate_id": decision.candidate_id, "calls": len(calls)}))
             candidate = validate_decision(decision, candidates, observation)
+            if idle:
+                waited = absorb(idle)
+                events.extend(waited)
+                latest = idle[-1].observation
+                fresh, stale = _still_valid(candidate, waited, latest, skills, buttons, goals)
+                wait = {"wait_ticks": len(idle), "decided_frame": observation.frame, "start_frame": latest.frame}
+                if stale is not None:
+                    # Too late: record the calls and what happened, then decide again on the latest state.
+                    events.append(Event(event_type="decision_stale", episode_id=observation.episode_id,
+                                        frame=latest.frame, certainty="derived",
+                                        payload={**wait, "candidate_id": decision.candidate_id, "reason": stale}))
+                    result.events.extend(events)
+                    if recorder is not None:
+                        recorder.record_planning(list(calls), events)
+                    emit("decision", {**_decision_view(observation, memory, candidates, screened, decision, calls,
+                                                        goals.scores if goals is not None else {}),
+                                      **wait, "stale": stale})
+                    observation = latest
+                    result.observation_ids.append(observation.observation_id)
+                    continue
+                wait["runs"] = fresh.candidate_id  # its id on the latest observation (ids are positional)
+                events.append(Event(event_type="decision_latency", episode_id=observation.episode_id,
+                                    frame=latest.frame, certainty="derived",
+                                    payload={**wait, "candidate_id": decision.candidate_id}))
+                candidate, start = fresh, latest
             result.decisions.append(decision)
-            emit("decision", _decision_view(observation, memory, candidates, screened, decision, calls))
-            run = execute(adapter, candidate, skills, observation, executor)
+            emit("decision", {**_decision_view(observation, memory, candidates, screened, decision, calls,
+                                                        goals.scores if goals is not None else {}), **wait})
+            run = execute(adapter, candidate, skills, start, executor)
             if run.outcome == "rejected":
                 # Candidates were generated from this observation, so this indicates a bug.
                 raise RuntimeError(f"candidate {candidate.candidate_id} rejected on its own observation: {run.reason}")
@@ -238,14 +325,14 @@ def run_episode(
             recorded = None
             if graph is not None:
                 ref = f"{recorder.episode_key if recorder else observation.episode_id}#{observation.observation_id}"
-                recorded = graph.record_execution(observation, run, ref,
+                recorded = graph.record_execution(start, run, ref,
                                                   None if goals is None else goals.predicted_safe(run.candidate_id))
             result.executions.append(run)
             emit("outcome", _outcome_view(run, events))
             if graph is not None and on_event is not None:
                 emit("graph", {**_graph_view(graph, observation.level_id, True),
-                               "last": _graph_last(graph, observation, run, recorded)})
-            tile = None if observation.player_position is None else player_tile(observation.player_position)
+                               "last": _graph_last(graph, start, run, recorded)})
+            tile = None if start.player_position is None else player_tile(start.player_position)
             result.execution_starts.append(None if tile is None else (tile.col, tile.row))
             result.events.extend(events)
             memory.record(decision, run)
@@ -254,7 +341,12 @@ def run_episode(
             observation = run.observation
             result.observation_ids.append(observation.observation_id)
             if goals is not None:
-                planned(goals.update(observation, memory, events, run))
+                step, idle = while_playing(lambda: goals.update(observation, memory, events, run), observation)
+                planned(step)
+                if idle:
+                    pending.extend(absorb(idle))
+                    observation = idle[-1].observation
+                    result.observation_ids.append(observation.observation_id)
             log.debug("frame=%d skill=%s outcome=%s reason=%s", observation.frame, run.skill, run.outcome, run.reason)
     except (Exception, KeyboardInterrupt) as exc:
         if isinstance(exc, KeyboardInterrupt):
@@ -294,6 +386,31 @@ def run_episode(
     return result
 
 
+STALE_EVENTS = frozenset({"death", "respawn"})
+
+
+def _still_valid(candidate, waited: list[Event], latest, skills, buttons,
+                 goals: GoalManager | None) -> tuple[Any, str | None]:
+    """After a real-time wait: the candidate for the chosen skill on the latest observation, or
+    why the choice is stale (Dave died or respawned, the episode ended, or the skill is no
+    longer legal or is now screened out)."""
+    happened = next((e.event_type for e in waited if e.event_type in STALE_EVENTS), None)
+    if happened is not None:
+        return None, f"event:{happened}"
+    if latest.terminal != "running":
+        return None, f"terminal:{latest.terminal}"
+    offered = generate_candidates(skills, buttons, latest)
+    fresh = next((c for c in offered.candidates if c.skill == candidate.skill), None)
+    if fresh is None:
+        return None, f"illegal:{offered.masked.get(candidate.skill, 'not offered')}"
+    if goals is not None and len(offered.candidates) > 1:
+        kept, screened = goals.annotate(latest, list(offered.candidates), skills)
+        if fresh.candidate_id in screened:
+            return None, f"screened:{screened[fresh.candidate_id]}"
+        fresh = next(c for c in kept if c.candidate_id == fresh.candidate_id)
+    return fresh, None
+
+
 def _failure_events(calls, observation) -> list[Event]:
     return [Event(event_type="model_failure", episode_id=observation.episode_id, frame=observation.frame,
                   payload={"provider": c.provider, "model": c.model, "purpose": c.purpose, "status": c.status})
@@ -326,7 +443,7 @@ def _call_view(call: ModelCallRecord) -> dict[str, Any]:
 def _graph_view(store: GraphStore, level_id: str, learning: bool) -> dict[str, Any]:
     level = store.get(level_id)
     return {"source": "learning" if learning else "frozen", "level_id": level_id,
-            "graph": None if level is None else level.view()}
+            "execution_mode": store.execution_mode, "graph": None if level is None else level.view()}
 
 
 def _graph_last(store: GraphStore, start, run: ExecutionResult, recorded: str | None) -> dict[str, Any]:
@@ -353,7 +470,7 @@ def _plan_view(step: PlanningStep) -> dict[str, Any]:
             "rationale": goal.get("rationale"), "waypoint": goal.get("waypoint"),
             "waypoints": goal.get("waypoints") or [], "route": r.route, "fallback": r.fallback,
             "fallback_reason": r.fallback_reason, "attempts": r.attempts, "errors": r.errors,
-            "model_ms": r.model_ms, "calls": [_call_view(c) for c in step.calls],
+            "planner": r.planner, "model_ms": r.model_ms, "calls": [_call_view(c) for c in step.calls],
             "candidates": [{"id": c.candidate_id, "description": c.description, "route": c.route, "path": c.path}
                            for c in r.request.candidates],
             "map": r.request.map, "platforms": list(r.request.platforms), "tried": list(r.request.attempts),
@@ -381,7 +498,10 @@ def _threat_view(obs) -> list[dict[str, Any]]:
 
 
 def _decision_view(obs, memory: WorkingMemory, candidates, screened: dict[str, str], decision,
-                   calls) -> dict[str, Any]:
+                   calls, scores: dict | None = None) -> dict[str, Any]:
+    """``scores``: the goal manager's live move scores (graph arms; none for a forced decision,
+    where no options were annotated)."""
+    scores = {} if decision.forced or scores is None else scores
     tactical = [c for c in calls if c.purpose == "tactical"]
     probabilities = next((c.output.get("probabilities") for c in reversed(tactical)
                           if c.output and c.output.get("probabilities")), None)
@@ -391,7 +511,8 @@ def _decision_view(obs, memory: WorkingMemory, candidates, screened: dict[str, s
                 "target": goal.target_ref, "type": goal.goal_type,
                 "waypoint": None if goal.next_waypoint is None else [goal.next_waypoint.col,
                                                                      goal.next_waypoint.row]},
-            "candidates": [{"id": c.candidate_id, "skill": c.skill, "description": c.description}
+            "candidates": [{"id": c.candidate_id, "skill": c.skill, "description": c.description,
+                            "score": scores[c.candidate_id].view() if c.candidate_id in scores else None}
                            for c in candidates],
             "screened": screened, "chosen": decision.candidate_id, "forced": decision.forced,
             "fallback": decision.fallback, "fallback_reason": decision.fallback_reason,

@@ -7,7 +7,7 @@ from dave_agent.memory.graph import WorldGraph, edge_key, segments, success_prob
 from dave_agent.schemas import Event, Observation, ObservedTile, PixelPos, Region, TilePos
 
 KINDS = {"#": ("solid", "brick"), "F": ("hazard", "fire"), "X": ("exit", "door"), "T": ("required_item", "trophy"),
-         "*": ("collectible", "gem")}
+         "*": ("collectible", "gem"), "J": ("item", "jetpack")}
 # Standable: row 3 above the floor (cols 0-9, door at 8) and row 1 above the ledge (cols 6-7).
 GRID = (
     "..........",

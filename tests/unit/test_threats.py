@@ -309,3 +309,55 @@ def test_a_death_after_a_move_predicted_safe_is_a_forecast_miss(config):
     assert miss is not None and miss.payload["cause"] == "plasma" and isinstance(miss, Event)
     notes = {c.skill: c.description for c in gm.annotate(start, candidates, tuple(specs.values()))[0]}
     assert "forecast missed here before: hit 1x (plasma) though predicted safe" in notes["move_right_1"]
+
+
+def armed(obs):
+    return obs.model_copy(update={"inventory": {"trophy": 0, "gun": 1, "jetpack_fuel": 0}})
+
+
+def test_a_turn_and_shoot_aims_the_other_way_after_a_2px_step():
+    from dave_agent.control.threats import shot, threats
+
+    o = armed(scene(entities=[monster(2 * 16, 56, steps=((0, 0),), shoot_in=10**6)]))  # left of Dave
+    found = threats(o)
+    assert shot(o, cells(), found)[0].startswith("shot: facing away from the swirl")
+    note, hit = shot(o, cells(), found, side=-1, shift=-2)
+    assert note.startswith("shot: hits the swirl") and hit is not None and hit[0] == "monster0"
+
+
+def test_only_the_turn_and_shoot_toward_the_back_is_offered(config):
+    for facing, back, front in (("right", "shoot_left", "shoot_right"), ("left", "shoot_right", "shoot_left")):
+        skills = {c.skill for c in offered(config, armed(scene(facing=facing)))[0]}
+        assert back in skills and front not in skills and "shoot" in skills
+    assert not {"shoot", "shoot_left", "shoot_right"} & {c.skill for c in offered(config, scene())[0]}  # no gun
+
+
+def test_a_shot_that_hits_a_monster_guarding_the_way_gets_a_route_note(config):
+    """A swirl 3 tiles away: the shot that hits it leads with a route note (it stays dead); the
+    move scores and the plain move options are unchanged by it."""
+    from dave_agent.control.goals import GoalManager
+    from dave_agent.models.planner import RuleMockPlanner
+
+    for facing, skill in (("right", "shoot"), ("left", "shoot_right")):
+        gm = GoalManager(RuleMockPlanner(), config.planning, 1, reach=DAVE, threats=config.skills.executor.threats)
+        obs = armed(scene(facing=facing, entities=[monster(8 * 16, 56, steps=((0, 0),), shoot_in=10**6)]))
+        gm._learn(obs)
+        candidates, specs = offered(config, obs)
+        kept, _ = gm.annotate(obs, candidates, tuple(specs.values()))
+        notes = {c.skill: c.description for c in kept}
+        assert notes[skill].startswith("route: shoot — hits the swirl in "), (facing, notes[skill])
+        assert "it stays dead" in notes[skill]
+        assert not any(n.startswith("route: shoot") for s, n in notes.items() if s != skill)
+
+
+def test_a_far_monster_that_blocks_nothing_gets_no_kill_note(config):
+    from dave_agent.control.goals import GoalManager
+    from dave_agent.models.planner import RuleMockPlanner
+
+    gm = GoalManager(RuleMockPlanner(), config.planning, 1, reach=DAVE, threats=config.skills.executor.threats)
+    obs = armed(scene(entities=[monster(16 * 16, 56, steps=((0, 0),), shoot_in=10**6)]))
+    gm._learn(obs)
+    candidates, specs = offered(config, obs)
+    kept, _ = gm.annotate(obs, candidates, tuple(specs.values()))
+    shoot = next(c.description for c in kept if c.skill == "shoot")
+    assert "shot: hits the swirl" in shoot and not shoot.startswith("route: shoot")

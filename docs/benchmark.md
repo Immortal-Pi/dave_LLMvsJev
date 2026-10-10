@@ -169,3 +169,23 @@ This is `experiments.yaml` with the frame-based settings rescaled to measured Da
 | `planning.min_frames_between_calls` | 60 | 150 | about 2 typical skills |
 | `planning.goal_timeout_frames` | 480 | 1200 | about 2× the whole scripted level-1 route |
 | `benchmark.max_episode_frames` | 600 | 3600 | about 6.5× the scripted route, with room for deaths (a burn is about 200 frames) |
+
+## Sweep: the offline scoreboard (`scripts/sweep.py`)
+
+The settings above, and the learned-route costs in `graph:`, were starting points. The sweep measures them for free: every episode is the real game with the rule planner and `RouteFollower` (`runner/follower.py`), a scripted tactical controller that always takes the `route:` option (a shot that hits first; `wait_short` when no option has a note). The goal manager, threat screen and executor are the same as every arm's. Nothing calls a model and nothing is written to an episode store.
+
+```bash
+uv run python scripts/sweep.py --out artifacts/sweeps/baseline                       # levels 1-4, current config
+uv run python scripts/sweep.py --grid configs/sweeps/planning.yaml --scenarios level1,level2,level3 \
+    --workers 24 --out artifacts/sweeps/gridA                                           # goal timing, every arm
+uv run python scripts/sweep.py --grid configs/sweeps/graph.yaml --graph warm --workers 24 --out artifacts/sweeps/gridB
+```
+
+- **Grid:** a YAML of dotted config keys to value lists (`graph.weights.risk: [0.5, 1.0, 2.0]`). Every combination is applied to the loaded config and validated by the config models before any episode runs (`runner/sweep.py` `override`).
+- **Graph:** `none` (arms A and B), `cold` (a fresh graph learning within the episode) or `warm` (`--train-episodes` follower episodes per scenario build a graph, then every evaluated seed reads a frozen copy, as in the warm regime above). Training seeds start at 1000.
+- **Seeds:** Dave has no randomness, and the follower and rule planner are deterministic, so every seed repeats the same episode. The default is `--seeds 0`.
+- **Workers:** each (config, scenario) is one unit in its own process (each episode starts its own game process). The rows go to `episodes.partial.jsonl` as units finish, then to `episodes.jsonl` in grid order, so the result does not depend on `--workers` (tested).
+- **Output:** `sweep.json` (grid, scenarios, frames, graph mode, the base config); `episodes.jsonl`, one row per episode: outcome, frames, deaths, score, `furthest_col`, goals set, achieved, expired and failed, the goal trace, planning triggers, and `route_share` (decisions that had a `route:` option). `summary.csv` has one row per config and scenario, plus `*` over all scenarios, ordered by the **rank key**: more completions, then fewer deaths, then fewer frames to complete, then further along on the levels not finished.
+- A non-empty `--out` is refused.
+
+**What it does not show.** The follower stands in for a tactical model that carries out the route notes perfectly. Planning thresholds apply to every arm, but a live planner and Jev may respond to them differently, so confirm a tuned value with a small paid benchmark before relying on it.

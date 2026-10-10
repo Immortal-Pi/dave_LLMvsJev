@@ -21,8 +21,10 @@ from dave_agent.control.level_map import render
 from dave_agent.control.platforms import Platforms
 from dave_agent.control.reach import DIRECTIONS, TILE, Cell, ReachMap, estimate_end_at, flight, frontier, grabs, \
     next_landing, next_waypoint, trace_flying, trace_in_jump, trace_skill
+from dave_agent.control.move_score import MoveScore, position_values, score_moves
 from dave_agent.control.skills import ExecutionResult
-from dave_agent.control.threats import Contact, assess_timing, contact_cause, firing_cells, safe_window, screen
+from dave_agent.control.threats import Contact, assess_timing, contact_cause, firing_cells, safe_window, screen, \
+    shot_hits, threat_key
 from dave_agent.memory.graph import BLOCKING_KINDS, STANDING_STATES, GraphStore, WorldGraph
 from dave_agent.memory.routes import Route, RouteTracker, find_route, held_items
 from dave_agent.memory.working import FAILED_OUTCOMES, WorkingMemory, player_tile
@@ -44,6 +46,11 @@ HARD_TRIGGERS = frozenset({"no_goal", "goal_achieved", "goal_failed", "goal_expi
 NO_PLANNING_STATES = frozenset({"burning", "dead"})  # inputs are ignored; plan after respawn
 NEARBY_TILES = 3  # hazards/monsters within this many tiles are summarized for the planner
 MAX_NEARBY = 10
+# A monster that a shooting option is predicted to hit guards the way when a move's predicted
+# contact is with it (or its shots), or when it is within this many tiles of Dave or of the next
+# waypoint: the shot then gets a ``route:`` note. Live runs on levels 5 and 6 offered ``shoot``
+# in 82-122 decisions per level and the model chose it 0-4 times; the route note won every time.
+KILL_NOTE_TILES = 3
 TAKEOFF_WALKS = 3  # how many walks ahead the route notes look for a jump's take-off
 FLY_LOOKAHEAD = 3  # flying: aim at the cell this many cells along the flight path
 # Self-sacrifice: after this many frames with no route note on any option (no safe move on the
@@ -56,6 +63,9 @@ SACRIFICE_FRAMES = 1200
 # and short hops; the person used 681 of 900 for the trophy at (5,2) and the door.
 FUEL_RESERVE = 400
 REQUIRED_GOALS = ("collect:trophy", "reach:door")
+FULL_FUEL = 900  # one jetpack pickup (docs/state_mapping.md): what a flight-only goal needs is assumed
+# The rule priority chooses unless one of these triggers fired (planning.llm_calls: escalate).
+ESCALATE_TRIGGERS = frozenset({"stuck", "repeated_failures", "death"})
 SACRIFICE_LIVES = 2
 
 
@@ -232,6 +242,7 @@ class PlanningRecord:
     route: dict[str, Any] | None
     route_ms: float
     model_ms: float
+    planner: str = "llm"  # who chose: llm, rule (escalate mode, no call) or fallback
 
 
 @dataclass
@@ -300,6 +311,8 @@ class GoalManager:
         self._risky: set[Cell] = set()  # cells in a monster's predicted line of fire, now
         self.credit = GoalCredit()  # what each skill did toward each target this episode
         self._credit_done: list[GoalSteps] = []
+        self.scores: dict[str, MoveScore] = {}  # the last decision's live move scores (graph arms)
+        self._hits: frozenset[str] = frozenset()  # options whose shot is predicted to hit a monster
 
     @property
     def level_graph(self) -> WorldGraph:
@@ -417,6 +430,10 @@ class GoalManager:
             candidates = tuple(c.model_copy(update={"path": self.platforms.path_note(
                 (c.target.col, c.target.row), DIRECTIONS.get(c.target_name, 0) if c.goal_type == "explore" else 0)})
                 for c in candidates)
+            # Loot is score only: with no known path it is noise for both planners.
+            candidates = tuple(c for c in candidates
+                               if not (c.target_kind == "collectible" and _no_path(c))) or candidates
+            candidates = self._requires(obs, candidates)
         route_ms = 0.0  # Python route search, timed separately from model latency (graph arms only)
         if self.graph is not None:
             t0 = time.perf_counter()
@@ -428,7 +445,12 @@ class GoalManager:
 
         chosen, fallback_reason, errors, attempts, model_ms = None, None, [], 0, 0.0
         partial = None  # a valid goal whose waypoints were rejected: used once the retries run out
-        if self.calls >= self.cfg.max_calls_per_episode:
+        avoid = self.previous["target_ref"] if self.previous and self.previous["status"] != "achieved" else None
+        source = "llm"
+        if self.cfg.llm_calls == "escalate" and not self._escalate(triggers, rule_choice(candidates, avoid)):
+            pick = rule_choice(candidates, avoid)
+            chosen, source = (pick, f"rule priority ({pick.goal_type})", []), "rule"
+        elif self.calls >= self.cfg.max_calls_per_episode:
             fallback_reason = "call_cap"
         else:
             feedback = None
@@ -475,9 +497,8 @@ class GoalManager:
                 self._pending.clear()  # keep the still-valid goal; nothing to replace it with
                 self._failures = 0
                 return step
-            avoid = self.previous["target_ref"] if self.previous and self.previous["status"] != "achieved" else None
             pick = rule_choice(candidates, avoid)
-            chosen = (pick, f"deterministic fallback ({fallback_reason})", [])
+            chosen, source = (pick, f"deterministic fallback ({fallback_reason})", []), "fallback"
 
         candidate, rationale, waypoints = chosen
         if self.log.open_goal is not None:
@@ -490,14 +511,15 @@ class GoalManager:
                                 request=request, chosen=candidate.candidate_id, fallback=fallback_reason is not None,
                                 fallback_reason=fallback_reason, attempts=attempts, errors=errors,
                                 goal_id=goal.goal_id, route=route, route_ms=round(route_ms, 3),
-                                model_ms=round(model_ms, 1))
+                                model_ms=round(model_ms, 1), planner=source)
         step.record = record
         step.events.append(Event(
             event_type="goal_set", episode_id=obs.episode_id, frame=obs.frame, location=candidate.target,
             entity_refs=(goal.goal_id,), certainty="derived",
             payload={"goal_id": goal.goal_id, "target_ref": goal.target_ref, "goal_type": goal.goal_type,
                      "triggers": list(record.triggers), "fallback": record.fallback,
-                     "fallback_reason": fallback_reason, "attempts": attempts, "rationale": goal.rationale,
+                     "fallback_reason": fallback_reason, "attempts": attempts, "planner": source,
+                     "rationale": goal.rationale,
                      "waypoint": goal.next_waypoint.model_dump() if goal.next_waypoint else None,
                      "route": route, "route_ms": record.route_ms, "model_ms": record.model_ms,
                      "waypoints": [[w.col, w.row] for w in waypoints],
@@ -585,6 +607,8 @@ class GoalManager:
         masked. End tiles need Dave standing on a known cell; contacts are also predicted while
         he free-falls. Mid-jump, each option gets its landing tile and the best landing toward the
         goal a route note (``_air_notes``). Unchanged without a reach envelope."""
+        self.scores = {}
+        self._hits = frozenset()
         if self.reach is None or obs.player_position is None:
             return candidates, {}
         self._fuel = (obs.inventory or {}).get("jetpack_fuel", 0)
@@ -607,14 +631,23 @@ class GoalManager:
         route = {**route, **self._fly_notes(obs, reach, safe, specs)}
         route = {**self._reveal_notes(obs, reach, here, safe, contacts, specs), **route,
                  **{cid: note for cid, (note, best) in air.items() if best}, **grab}
-        if here is not None and not route and self.threats is not None:
+        kill = self._kill_notes(obs, reach, safe, contacts, specs) if self.threats is not None else {}
+        # A kill clears the way: no wait for a gap between the shots is needed.
+        if here is not None and not route and not kill and self.threats is not None:
             route, timing = self._wait_notes(obs, reach, here, candidates, safe, contacts, specs, ends, timing)
+        route = {**route, **kill}
         sacrifice = self._sacrifice_notes(obs, here, route, candidates, contacts) if self.threats is not None else {}
         route = {**route, **sacrifice}
+        if here is not None:
+            self.scores = self._move_scores(obs, candidates, ends)
         out = []
         for c in candidates:
             notes = []
             if here is not None:
+                if self._fuel and specs[c.skill].buttons == {"jetpack"} and c.candidate_id not in route:
+                    notes.append(f"uses fuel ({self._fuel} left): not needed for the planned route")
+                if c.candidate_id in self.scores:
+                    notes.append(self.scores[c.candidate_id].note())
                 end = ends[c.candidate_id]
                 edge = contacts.get(c.candidate_id) is not None and not _blocks(contacts[c.candidate_id])
                 notes.append("estimated end: past the screen edge, unseen" if edge else
@@ -647,6 +680,36 @@ class GoalManager:
         if self.threats is None or not self.threats.mask:
             return out, {}
         return screen(out, {cid: None if cid in sacrifice else c for cid, c in contacts.items()})
+
+    def _kill_notes(self, obs: Observation, reach: ReachMap, candidates: list[SkillCandidate],
+                    contacts: dict[str, Contact | None], specs: dict[str, SkillSpec]) -> dict[str, str]:
+        """``route:`` notes on the shooting options predicted to hit a monster that guards the way
+        (``KILL_NOTE_TILES``): a monster hit by a bullet burns and stays dead for the rest of the
+        level, its plasma stops (monster.c, game.c), so the moves past it become safe. Sets
+        ``_hits`` (the options predicted to hit any monster) for the move scores."""
+        hits = {cid: hit for cid, (_, hit) in shot_hits(obs, reach.cells, candidates, specs).items() if hit}
+        self._hits = frozenset(hits)
+        if not hits:
+            return {}
+        guards: set[str] = set()
+        for contact in contacts.values():
+            if contact is not None and contact.blocks and contact.kind != "hazard":
+                what = threat_key(contact.what)  # a monster's shot, flying or due: plasma<n>
+                guards.add("monster" + what[len("plasma"):] if what.startswith("plasma") else what)
+        assert obs.player_position is not None
+        near = [(obs.player_position.x + 8) // TILE, (obs.player_position.y + 8) // TILE]
+        spots = [tuple(near)] + ([(wp.col, wp.row)] if self.goal is not None and (wp := self.goal.next_waypoint)
+                                 else [])
+        kinds = {}
+        for e in obs.entities:
+            if not e.visible or e.entity_type in ("plasma", "bullet"):
+                continue
+            kinds[e.entity_id] = e.entity_type
+            col, row = (e.position.x + 12) // TILE, (e.position.y + 10) // TILE
+            if any(max(abs(col - c), abs(row - r)) <= KILL_NOTE_TILES for c, r in spots):
+                guards.add(e.entity_id)
+        return {cid: f"route: shoot — hits the {kinds.get(m, 'monster')} in {tick} ticks; it stays dead and the "
+                     f"way on is clear" for cid, (m, tick) in hits.items() if m in guards}
 
     def _sacrifice_notes(self, obs: Observation, here: Cell | None, route: dict[str, str],
                          candidates: list[SkillCandidate], contacts: dict[str, Contact | None]) -> dict[str, str]:
@@ -681,7 +744,7 @@ class GoalManager:
         moment it is safe (``threats.safe_window``), as a ``route: wait`` note on the longest safe
         wait that does not pass it, and a ``timing: safe from`` note on the move itself."""
         blocked = [c for c in candidates if _blocks(contacts.get(c.candidate_id))
-                   and specs[c.skill].buttons & {"left", "right", "jump"}]
+                   and specs[c.skill].buttons & {"left", "right", "jump"} and "fire" not in specs[c.skill].buttons]
         wanted = self._route_notes(obs, here, blocked, specs, ends)
         if not wanted:
             return {}, timing
@@ -904,8 +967,8 @@ class GoalManager:
         # On-ground skills only: the jetpack's flights press the same keys (up is the jump key).
         ground = [spec for spec in specs.values() if "jetpacking" not in spec.preconditions]
         jumps = [spec for spec in ground if "jump" in spec.phases[0].buttons]
-        walks = [spec for spec in ground
-                 if "jump" not in spec.phases[0].buttons and any(b in DIRECTIONS for b in spec.buttons)]
+        walks = [spec for spec in ground if "jump" not in spec.phases[0].buttons and "fire" not in spec.buttons
+                 and any(b in DIRECTIONS for b in spec.buttons)]
 
         def walk(px: int, spec: SkillSpec) -> int | None:
             """Dave's x after ``spec`` from x ``px``, if he is still standing on this row and
@@ -1011,7 +1074,7 @@ class GoalManager:
                 cell = (w[0], w[1])
             if not self._standable(*cell):
                 return valid, [(f"waypoint {given} is not an empty explored cell directly above a '#' on the map; "
-                                "give standing tiles [col, row] or platform ids")]
+                                "give platform ids from `platforms`")]
             if reach is not None and prev is not None and reach.path(prev, {cell}) is None:
                 return valid, [self._unreachable(reach, prev, cell, f"waypoint {given}")]
             valid.append(TilePos(col=cell[0], row=cell[1]))
@@ -1152,6 +1215,33 @@ class GoalManager:
                 prev = c
         return out
 
+    def _escalate(self, triggers: set[str], rule: GoalCandidate) -> bool:
+        """Escalate mode: whether the planner model decides this time. It does on a trigger that
+        needs reasoning (stuck, repeated failures, a death), and when the rule's choice already
+        ended without success ``rule_repeat_limit`` times on this level (a rule loop)."""
+        if triggers & ESCALATE_TRIGGERS:
+            return True
+        failed = sum(a["goal"] == rule.candidate_id and a["outcome"] != "achieved" for a in self.log.attempts)
+        return failed >= self.cfg.rule_repeat_limit
+
+    def _requires(self, obs: Observation,
+                  candidates: tuple[GoalCandidate, ...]) -> tuple[GoalCandidate, ...]:
+        """Mark the item goals that only a flight reaches while Dave has no fuel: ``requires``
+        the jetpack, and the path says so (with where the jetpack is, when known)."""
+        here = self._located(obs)
+        if self._fuel or here is None or self.reach is None:
+            return candidates
+        jetpack = next((c for c in candidates if c.goal_type == "collect" and c.target_name == "jetpack"), None)
+        flying = ReachMap(self._cells, self.reach, self.log.failures(), self._risky, fuel=FULL_FUEL)
+        out = []
+        for c in candidates:
+            if c.goal_type in ("collect", "reach") and c is not jetpack and _no_path(c) and                     flying.path(here, flying.targets_for((c.target.col, c.target.row))) is not None:
+                where = f"; jetpack at ({jetpack.target.col},{jetpack.target.row})" if jetpack else ""
+                c = c.model_copy(update={"requires": ("jetpack",),
+                                         "path": f"{c.path}; reachable with the jetpack (not held{where})"})
+            out.append(c)
+        return tuple(out)
+
     def _platforms(self, obs: Observation, candidates: tuple[GoalCandidate, ...]) -> Platforms | None:
         reach = self._reach_map()
         if reach is None:
@@ -1183,6 +1273,24 @@ class GoalManager:
                 return
 
     # -- learned routes (graph-enabled arms only) -------------------------------------------
+    def _move_scores(self, obs: Observation, candidates: list[SkillCandidate],
+                     ends: dict[str, Cell | None]) -> dict[str, MoveScore]:
+        """Each option's cost to the goal from the live graph, and its regret against the best
+        option from here (control/move_score.py). Empty off a mapped platform or without a graph."""
+        if self.graph is None or self.graph_cfg is None:
+            return {}
+        graph = self.graph.get(obs.level_id)
+        here = None if graph is None else graph.locate(obs)
+        if here is None:
+            return {}
+        target = ((self._tracker.route.target or None)
+                  if self._tracker is not None and self.goal is not None else None)
+        target_ref = self.goal.target_ref if self.goal is not None else None
+        values, mode = position_values(graph, target, obs.inventory, self.graph_cfg, target_ref)
+        goal = None if target is None or self.goal is None else (target, _goal_tile(self.goal).col)
+        return score_moves(graph, here, values, mode, candidates, ends, obs.inventory, self.graph_cfg, target_ref,
+                           goal, player_tile(obs.player_position).col if obs.player_position else None, self._hits)
+
     def _target_node(self, obs: Observation, candidate: GoalCandidate, start: str | None) -> str | None:
         graph = self.level_graph
         if candidate.goal_type != "explore":
@@ -1272,7 +1380,8 @@ class GoalManager:
             episode_id=obs.episode_id, level_id=obs.level_id, frame=obs.frame, observation_id=obs.observation_id,
             triggers=triggers,
             player={"tile": [here.col, here.row] if here else None, "state": obs.player_state,
-                    "grounded": obs.grounded, "facing": obs.facing},
+                    "grounded": obs.grounded, "facing": obs.facing,
+                    "fuel": {"left": self._fuel, "reserve": FUEL_RESERVE}},
             lives=obs.lives, inventory=obs.inventory, score=obs.score,
             view_cols=(obs.region.min.col, obs.region.max.col), nearby=tuple(nearby[:MAX_NEARBY]),
             recent=recent, previous_goal=self.previous,
@@ -1283,6 +1392,10 @@ class GoalManager:
             platforms=tuple(self.platforms.views()) if self.platforms is not None else (),
             attempts=tuple(self.log.views()), failed_links=tuple(self.log.failed_links()),
         )
+
+
+def _no_path(candidate: GoalCandidate) -> bool:
+    return bool(candidate.path and candidate.path.startswith("no known path"))
 
 
 def _blocks(contact: Contact | None) -> bool:

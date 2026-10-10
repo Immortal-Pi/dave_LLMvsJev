@@ -283,6 +283,21 @@ skills:
         preconditions: [alive, has_gun, facing_side, no_bullet, screen_still]
         phases: [{buttons: [fire], ticks: 1}]
         interrupt_on: [death, terminal]
+      # Turn and shoot: one tick of a walk key turns a standing Dave and steps him 2 px
+      # (dave.c dave_state_walking_enter), then he fires. Only offered facing the other way: a
+      # monster behind him costs no full walk step (24 ticks) toward it.
+      - name: shoot_left
+        kind: macro
+        description: turn left (a 2 px step) and fire the gun left
+        preconditions: [has_gun, on_ground, facing_right, no_bullet, screen_still]
+        phases: [{buttons: [left], ticks: 1}, {buttons: [fire], ticks: 1}]
+        interrupt_on: [death, terminal]
+      - name: shoot_right
+        kind: macro
+        description: turn right (a 2 px step) and fire the gun right
+        preconditions: [has_gun, on_ground, facing_left, no_bullet, screen_still]
+        phases: [{buttons: [right], ticks: 1}, {buttons: [fire], ticks: 1}]
+        interrupt_on: [death, terminal]
 
       # wait_long has no precondition so a legal candidate always exists (e.g. while burning).
       - name: wait_short

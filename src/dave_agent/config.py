@@ -49,6 +49,14 @@ class AzureModelConfig(Strict):
     price: PriceConfig | None = None  # None: cost unknown (never assumed)
 
 
+class PlannerModelConfig(AzureModelConfig):
+    # false: the explored-map grid is left out of the planner's message when platforms are sent
+    # (the LLM misreads walls on the grid; docs/planner.md)
+    send_map: bool = True
+    # used instead of reasoning_effort when the triggers include stuck or repeated_failures
+    reasoning_effort_stuck: ReasoningEffort | None = None
+
+
 class JevModelConfig(Strict):
     provider: Literal["openrouter_decisions"]
     endpoint: str
@@ -57,7 +65,7 @@ class JevModelConfig(Strict):
 
 
 class ModelsConfig(Strict):
-    planner: AzureModelConfig
+    planner: PlannerModelConfig
     tactical_llm: AzureModelConfig
     jev: JevModelConfig
     timeout_seconds: Annotated[float, Field(gt=0, le=120)]
@@ -210,6 +218,9 @@ class GraphConfig(Strict):
     # for that target that used the move from that platform and were achieved.
     credit_bonus: Annotated[float, Field(ge=0, lt=1)] = 0.5
     credit_penalty: Annotated[float, Field(ge=0)] = 1.0
+    # Live move scores (control/move_score.py): a shot's cost is lowered by kill_bonus times the
+    # share of past shots from that platform that killed a monster.
+    kill_bonus: Annotated[float, Field(ge=0)] = 0.5
 
     @model_validator(mode="after")
     def _clip_ordered(self) -> GraphConfig:
@@ -230,6 +241,11 @@ class PlanningConfig(Strict):
     goal_timeout_frames: PositiveInt  # a goal not achieved by then expires
     recent_events: PositiveInt  # recent history entries shown to the planner
     nearest_collectibles: Annotated[int, Field(ge=0)]  # score items offered as collect goals
+    # always: every planning point calls the planner. escalate: the rule priority chooses, and the
+    # planner is called only on stuck, repeated_failures or death, or when the rule's choice
+    # already failed rule_repeat_limit times on this level (docs/planner.md).
+    llm_calls: Literal["always", "escalate"] = "always"
+    rule_repeat_limit: Annotated[int, Field(ge=1, le=6)] = 2  # attempts kept: control/attempts.py
 
 
 class TacticalConfig(Strict):

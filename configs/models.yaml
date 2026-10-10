@@ -3,8 +3,10 @@ models:
   planner:
     provider: azure_openai
     deployment_env: AZURE_OPENAI_CHAT_DEPLOYMENT
-    max_completion_tokens: 2000   # includes reasoning tokens
+    max_completion_tokens: 4000   # includes reasoning tokens (room for medium effort when stuck)
     reasoning_effort: low         # verified accepted by gpt-5.4-mini (2026-10-03)
+    reasoning_effort_stuck: medium  # on stuck / repeated_failures triggers only
+    send_map: false               # platforms carry the map; the LLM misreads walls on the grid
     # Azure reports no cost. Fill in your deployment's prices to get *estimated* costs and a
     # working paid-run ceiling, e.g. {input_per_mtok: 0.0, output_per_mtok: 0.0, source: "<price page URL>",
     # as_of: "YYYY-MM-DD"}. null: cost unknown (a live benchmark then needs --allow-unpriced).

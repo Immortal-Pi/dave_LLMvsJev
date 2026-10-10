@@ -37,7 +37,7 @@ from dave_agent.models.jev import JevTacticalModel
 from dave_agent.models.planner import PlanningRequest
 from dave_agent.models.tactical import TacticalOutputError, TacticalRequest, context_digest, tactical_request
 from dave_agent.runner.episode import run_episode
-from dave_agent.runner.session import azure_tactical, jev_tactical
+from dave_agent.runner.session import azure_tactical, graph_store_path, jev_tactical
 from dave_agent.schemas import Decision, ModelCallRecord, Observation, SkillCandidate, SnapshotRef
 
 SCHEMA_VERSION = 1
@@ -91,6 +91,9 @@ def load_recorded(store: Path, run_id: str) -> Recorded:
         key = ep["episode_key"]
         raw = json.loads(run["config_json"])
         config = AppConfig.model_validate({k: v for k, v in raw.items() if k in AppConfig.model_fields})
+        if config.environment.execution_mode == "real_time":
+            raise InspectError(f"run {run_id!r} ran in real time (the game ran on while models thought); "
+                               "it cannot be replayed exactly, so it cannot be inspected")
         decisions = [dict(r) for r in conn.execute(
             "SELECT d.*, s.skill, s.outcome AS skill_outcome, s.reason AS skill_reason, s.frames AS skill_frames, "
             "o.observation_json, eo.observation_json AS end_json FROM decisions d "
@@ -196,15 +199,16 @@ class ReplayController:
 # -- graph -------------------------------------------------------------------------------------------
 def default_graph_path(config: AppConfig, arm: str, adapter: str) -> Path:
     return (config.memory.graph_checkpoint
-            or Path(config.memory.episode_store).parent / "graphs" / f"arm-{arm}" / f"{adapter}.json")
+            or graph_store_path(Path(config.memory.episode_store).parent, arm, adapter,
+                                config.environment.execution_mode))
 
 
-def _before(file: Path, run_id: str, caps, policy: str):
+def _before(file: Path, run_id: str, caps, policy: str, mode: str):
     """A checkpoint file as it was before ``run_id``: itself, or its ``.bak`` when the file already
     includes the run; None when neither does."""
     for candidate in (file, file.with_name(file.name + ".bak")):
         if candidate.exists():
-            graph = load_checkpoint(candidate, caps.adapter, caps.build_id, policy)
+            graph = load_checkpoint(candidate, caps.adapter, caps.build_id, policy, mode)
             if all(entry["run_id"] != run_id for entry in graph.lineage):
                 return graph
     return None
@@ -216,13 +220,13 @@ def graph_before(path: Path, run_id: str, adapter: GameAdapter, config: AppConfi
     out (its lineage starts with the run). A legacy combined checkpoint is split by level.
     Refused when a level learned before the run has no saved version from before it."""
     caps = adapter.capabilities()
-    policy = config.environment.observation_policy
+    policy, mode = config.environment.observation_policy, config.environment.execution_mode
     directory = store_dir(path)
     if directory.is_dir():
-        store = GraphStore(caps.adapter, caps.build_id, policy, config.graph.evidence_per_item)
+        store = GraphStore(caps.adapter, caps.build_id, policy, config.graph.evidence_per_item, mode)
         files = sorted(directory.glob("*.json"))
         for file in files:
-            graph = _before(file, run_id, caps, policy)
+            graph = _before(file, run_id, caps, policy, mode)
             if graph is None:
                 lineage = load_checkpoint(file).lineage
                 if lineage and lineage[0]["run_id"] == run_id:
@@ -234,7 +238,7 @@ def graph_before(path: Path, run_id: str, adapter: GameAdapter, config: AppConfi
             if files:
                 return store, directory
     elif path.suffix == ".json":
-        graph = _before(path, run_id, caps, policy)
+        graph = _before(path, run_id, caps, policy, mode)
         if graph is not None:
             return split_levels(graph), path
     raise InspectError(f"no graph checkpoint from before run {run_id!r} at {path} (or its .bak); "
@@ -351,7 +355,7 @@ def inspect_run(store: Path, run_id: str, out: Path, graph: str | None = None, s
             if graph == "empty":
                 caps = adapter.capabilities()
                 use_graph = GraphStore(caps.adapter, caps.build_id, config.environment.observation_policy,
-                                       config.graph.evidence_per_item)
+                                       config.graph.evidence_per_item, config.environment.execution_mode)
                 graph_source = "empty"
             else:
                 path = Path(graph) if graph else default_graph_path(config, rec.arm, rec.adapter)

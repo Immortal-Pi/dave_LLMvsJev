@@ -39,6 +39,12 @@ def edge_key(skill: str, context: tuple[str, ...]) -> str:
     return f"{skill}|{','.join(context)}"
 
 
+def shot_killed(start: Observation, end: Observation) -> bool:
+    """A monster seen at the shot's start is gone at its end (Dave's bullet and plasma excluded)."""
+    monsters = {e.entity_id for e in start.entities if e.visible and e.entity_type not in ("bullet", "plasma")}
+    return bool(monsters - {e.entity_id for e in end.entities})
+
+
 def segments(obs: Observation) -> list[dict[str, Any]]:
     """Standable runs in one observation, ordered by row then column."""
     kinds: dict[tuple[int, int], str] = {(t.pos.col, t.pos.row): t.kind for t in obs.tiles}
@@ -68,10 +74,13 @@ class WorldGraph:
     checkpoints); a ``GraphStore`` always sets it, so observing another level is a bug."""
 
     def __init__(self, adapter: str, build_id: str, observation_policy: str, evidence_limit: int = 20,
-                 level_id: str | None = None) -> None:
+                 level_id: str | None = None, execution_mode: str = "paused_step") -> None:
         self.adapter, self.build_id, self.observation_policy = adapter, build_id, observation_policy
         self.evidence_limit = evidence_limit
         self.level_id = level_id
+        # Learned with the game paused while models think (paused_step) or running on (real_time):
+        # outcomes and timing differ, so the two are never mixed (docs/graph.md).
+        self.execution_mode = execution_mode
         self.g = nx.MultiDiGraph()
         self.aliases: dict[str, str] = {}
         self.suggestions: list[dict[str, Any]] = []
@@ -162,6 +171,9 @@ class WorldGraph:
             self._add_failure_record(a["failed_attempts"], key, rec["attempts"], rec["fatal"], rec["evidence"])
         self._add_evidence(a, b["evidence"], b["evidence_count"])
         a["incidents"] = (a.get("incidents", []) + b.get("incidents", []))[-self.evidence_limit:]
+        for field in ("shots", "kills"):
+            if field in b:
+                a[field] = a.get(field, 0) + b[field]
         for key, rec in b.get("credit", {}).items():
             into = a.setdefault("credit", {}).setdefault(key, {"tries": 0, "closer": 0, "goals": 0, "reached": 0})
             for field in into:
@@ -227,6 +239,10 @@ class WorldGraph:
         self._add_evidence(self.g.nodes[source], [ref], 1)
         if fatal:
             self._add_incident(self.g.nodes[source], run, ref, predicted_safe)
+        if run.skill in ("shoot", "shoot_left", "shoot_right"):  # live move scores (control/move_score.py) credit shots that kill
+            node = self.g.nodes[source]
+            node["shots"] = node.get("shots", 0) + 1
+            node["kills"] = node.get("kills", 0) + int(shot_killed(start, run.observation))
 
         if run.outcome == "completed":
             target = self.locate(run.observation)
@@ -422,15 +438,17 @@ class GraphStore:
     episode loop and the goal manager use it like a graph: every call is routed by the
     observation's ``level_id``, so no node, edge, frontier or route ever spans two levels."""
 
-    def __init__(self, adapter: str, build_id: str, observation_policy: str, evidence_limit: int = 20) -> None:
+    def __init__(self, adapter: str, build_id: str, observation_policy: str, evidence_limit: int = 20,
+                 execution_mode: str = "paused_step") -> None:
         self.adapter, self.build_id, self.observation_policy = adapter, build_id, observation_policy
         self.evidence_limit = evidence_limit
+        self.execution_mode = execution_mode
         self.levels: dict[str, WorldGraph] = {}
 
     def for_level(self, level_id: str) -> WorldGraph:
         if level_id not in self.levels:
             self.levels[level_id] = WorldGraph(self.adapter, self.build_id, self.observation_policy,
-                                               self.evidence_limit, level_id)
+                                               self.evidence_limit, level_id, self.execution_mode)
         return self.levels[level_id]
 
     def get(self, level_id: str) -> WorldGraph | None:

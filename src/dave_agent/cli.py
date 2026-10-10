@@ -312,7 +312,7 @@ def _cmd_graph(args: argparse.Namespace) -> int:
         _rekey(store, args.checkpoint, config, args.rekey)
     report: dict = {"checkpoint": str(store_dir(args.checkpoint)), "adapter": store.adapter,
                     "build_id": store.build_id, "observation_policy": store.observation_policy,
-                    "episodes": len(store.lineage), **store.counts(),
+                    "execution_mode": store.execution_mode, "episodes": len(store.lineage), **store.counts(),
                     "per_level": {level: g.counts() for level, g in sorted(store.levels.items())}}
     if args.yaml:
         report["yaml"] = str(export_store_yaml(store, args.yaml))

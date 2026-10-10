@@ -8,7 +8,7 @@ The code is in `src/dave_agent/memory/`:
 | `detector.py` | `EventDetector` |
 | `episodes.py` | `EpisodeStore` and `EpisodeRecorder` |
 
-Replay lives in `src/dave_agent/runner/replay.py`. Learned graph memory is Phase 5 and is not covered here.
+Replay lives in `src/dave_agent/runner/replay.py`. Learned graph memory is Phase 5 and is not covered here (`docs/graph.md`); it is the only memory kept across runs, with a separate store for paused and real-time play.
 
 ## Working memory (in-process, per episode)
 
@@ -52,6 +52,8 @@ Every arm builds the identical memory, which `tests/unit/test_arm_parity.py` ass
 Before every model decision (`control/experience.py`, called from `run_episode`), each offered candidate that was tried before gets notes appended to its description. The notes come before the reach estimate:
 - **every arm:** `this episode from here: 2x, 2 died (burned), last end [3,9]` (working-memory experience for Dave's tile);
 - **graph-enabled arms:** `past runs from this platform: 5x, 3 ok, 2 fatal, lands row 7 cols 4-9` (`WorldGraph.skill_evidence`). It is read from a copy of the graph taken at episode start, so this episode is never counted twice. A frozen warm checkpoint gives the same notes in every trial.
+
+- **graph-enabled arms:** `score: best (2.1 to goal; ok 4/5)`: the live move score, added by the goal manager from the graph as it is now, this episode included (`docs/graph.md`, "Live move scores").
 
 - **graph-enabled arms:** `past goals like this one from this platform: 3/4 reached (9/12 tries closer)`: the learned goal credit toward the active goal's target (below).
 

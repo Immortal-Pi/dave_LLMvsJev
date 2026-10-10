@@ -15,6 +15,7 @@ The inspector therefore replays the episode on the real game with the recorded c
   - `--graph PATH` names a store (or a legacy combined checkpoint) explicitly, and `--graph empty` starts from an empty store.
   - A level learned before the run with no saved version from before it is refused.
 - **Threat screen:** candidates are screened again during the replay (`docs/skills.md`), since the screen depends only on observations. Runs recorded before the screen existed no longer match their digests.
+- **Live move scores:** graph-arm options carry a score note from the live graph (`docs/graph.md`); the replay rebuilds the graph as it learned, so the notes are reproduced. Graph-arm runs recorded before the scores existed no longer match their digests.
 
 **Exactness check.** Every rebuilt request's `context_digest` must equal the recorded one. The first mismatch stops the inspection with the decision number (`InspectError`), so a bundle is never shown as exact when it is not. The settings come from the config recorded with the run, not from a config file.
 
@@ -50,6 +51,16 @@ uv run dave-agent inspect ... --decisions 93-94 --ask jev --ask azure   # PAID: 
 | `decisions/<seq>.bmp` | The screenshot. |
 
 `schema_version` is 1. The Azure body carries `<deployment>` instead of the deployment name, and no body contains credentials.
+
+## Re-asking the planner (`scripts/replan.py`)
+
+```bash
+uv run python scripts/replan.py artifacts/inspect/<run-id> --limit 10   # PAID: one Azure call per planner request
+```
+
+It takes each distinct planner request in the bundle (`planner.request`), sends it to the Azure planner with the **current** prompt and `models.planner` settings, and prints the recorded choice (the `goal_set` made from that request) beside the new one, with its waypoints and rationale. Use it to check a planner prompt change on real situations without playing.
+- The requests are as recorded: fields added later (`requires`, `player.fuel`) are missing from old bundles, and candidates later left out (unreachable loot) are still offered.
+- Waypoints are printed, not checked; that needs the game state.
 
 ## Viewer (`frontend/`)
 

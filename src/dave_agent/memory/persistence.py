@@ -8,7 +8,8 @@ written back as a directory, so earlier learning is kept.
 Saving is atomic: the new checkpoint is written to ``<path>.tmp`` and fsynced, the current
 file is copied to ``<path>.bak``, and only then is the temp file renamed over ``<path>``. An
 interrupted save therefore leaves the previous valid checkpoint in place. Loading rejects a
-checkpoint whose schema, adapter, build or observation policy differs from the run's.
+checkpoint whose schema, adapter, build, observation policy or execution mode differs from the
+run's. A checkpoint written before the execution mode was recorded is ``paused_step``.
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ import yaml
 from dave_agent.memory.graph import GraphStore, WorldGraph
 
 GRAPH_SCHEMA_VERSION = 1
+DEFAULT_EXECUTION_MODE = "paused_step"  # every checkpoint written before the field existed
 
 
 class GraphCheckpointError(ValueError):
@@ -37,6 +39,7 @@ def to_checkpoint(graph: WorldGraph) -> dict[str, Any]:
         "adapter": graph.adapter,
         "build_id": graph.build_id,
         "observation_policy": graph.observation_policy,
+        "execution_mode": graph.execution_mode,
         "level_id": graph.level_id,
         "scenarios": sorted(graph.scenarios),
         "lineage": graph.lineage,
@@ -54,7 +57,7 @@ def to_checkpoint(graph: WorldGraph) -> dict[str, Any]:
 
 def from_checkpoint(data: dict[str, Any]) -> WorldGraph:
     graph = WorldGraph(data["adapter"], data["build_id"], data["observation_policy"], data["evidence_limit"],
-                       data.get("level_id"))
+                       data.get("level_id"), data.get("execution_mode", DEFAULT_EXECUTION_MODE))
     graph.scenarios = set(data["scenarios"])
     graph.lineage = list(data["lineage"])
     graph.parent_sha256 = data["parent_sha256"]
@@ -90,8 +93,9 @@ def save_checkpoint(graph: WorldGraph, path: Path | str) -> Path:
 
 
 def load_checkpoint(path: Path | str, adapter: str | None = None, build_id: str | None = None,
-                    observation_policy: str | None = None) -> WorldGraph:
-    """Load a checkpoint; any expectation given (adapter, build, policy) must match exactly."""
+                    observation_policy: str | None = None, execution_mode: str | None = None) -> WorldGraph:
+    """Load a checkpoint; any expectation given (adapter, build, policy, execution mode) must
+    match exactly."""
     path = Path(path)
     if not path.exists():
         raise GraphCheckpointError(f"graph checkpoint not found: {path}")
@@ -105,7 +109,9 @@ def load_checkpoint(path: Path | str, adapter: str | None = None, build_id: str 
         raise GraphCheckpointError(
             f"{path}: graph schema version {version}, this code reads {GRAPH_SCHEMA_VERSION}; start a new checkpoint"
         )
-    for name, expected in (("adapter", adapter), ("build_id", build_id), ("observation_policy", observation_policy)):
+    data.setdefault("execution_mode", DEFAULT_EXECUTION_MODE)
+    for name, expected in (("adapter", adapter), ("build_id", build_id), ("observation_policy", observation_policy),
+                           ("execution_mode", execution_mode)):
         if expected is not None and data.get(name) != expected:
             raise GraphCheckpointError(
                 f"{path}: checkpoint {name} is {data.get(name)!r} but this run uses {expected!r}; "
@@ -148,7 +154,8 @@ def save_store(store: GraphStore, path: Path | str) -> Path:
 def split_levels(graph: WorldGraph) -> GraphStore:
     """A legacy all-levels graph as one graph per level: nodes by their ``level_id``, edges only
     between nodes of the same level, suggestions by level; lineage and counters are copied."""
-    store = GraphStore(graph.adapter, graph.build_id, graph.observation_policy, graph.evidence_limit)
+    store = GraphStore(graph.adapter, graph.build_id, graph.observation_policy, graph.evidence_limit,
+                       graph.execution_mode)
     for node, data in graph.g.nodes(data=True):
         store.for_level(data["level_id"]).g.add_node(node, **data)
     for u, v, key, data in graph.g.edges(keys=True, data=True):
@@ -164,7 +171,7 @@ def split_levels(graph: WorldGraph) -> GraphStore:
 
 
 def load_store(path: Path | str, adapter: str | None = None, build_id: str | None = None,
-               observation_policy: str | None = None) -> GraphStore:
+               observation_policy: str | None = None, execution_mode: str | None = None) -> GraphStore:
     """Load a store directory, or split a legacy combined checkpoint; expectations as for
     ``load_checkpoint``, checked on every level."""
     path = Path(path)
@@ -173,17 +180,19 @@ def load_store(path: Path | str, adapter: str | None = None, build_id: str | Non
         files = sorted(directory.glob("*.json"))
         if not files:
             raise GraphCheckpointError(f"graph store {directory} holds no level checkpoints")
-        first = load_checkpoint(files[0], adapter, build_id, observation_policy)
-        store = GraphStore(first.adapter, first.build_id, first.observation_policy, first.evidence_limit)
+        first = load_checkpoint(files[0], adapter, build_id, observation_policy, execution_mode)
+        store = GraphStore(first.adapter, first.build_id, first.observation_policy, first.evidence_limit,
+                           first.execution_mode)
         for file in files:
-            graph = first if file == files[0] else load_checkpoint(file, adapter, build_id, observation_policy)
+            graph = first if file == files[0] else load_checkpoint(file, adapter, build_id, observation_policy,
+                                                                   execution_mode)
             level_id = graph.level_id or file.stem
             if graph.level_id is None:  # a single-level checkpoint written before levels were split
                 graph.level_id = level_id
             store.levels[level_id] = graph
         return store
     if path.suffix == ".json" and path.is_file():
-        return split_levels(load_checkpoint(path, adapter, build_id, observation_policy))
+        return split_levels(load_checkpoint(path, adapter, build_id, observation_policy, execution_mode))
     raise GraphCheckpointError(f"graph store not found: {directory} (or a legacy {directory}.json)")
 
 

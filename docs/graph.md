@@ -84,6 +84,20 @@ Each level's graph is a NetworkX `MultiDiGraph`. It is used only by graph-enable
 
 `RouteTracker` follows a route at decision boundaries only. It returns a replan reason in this order: `target_reached`, `edge_failed`, `inventory_changed`, `topology_changed` (when `topology_version` changed, i.e. a node or edge was added or merged), or `off_route`.
 
+## Live move scores (`control/move_score.py`)
+
+While Dave plays, every option of a decision is scored from the **live** graph, the one learning this episode, so a move that just failed scores worse at the next decision. Graph-enabled arms only; the score informs and nothing is masked or reordered.
+
+- **Position value `V(p)`:** the cost of the best way from platform `p` to the goal's target, choosing the best move at every step. One reverse Dijkstra from the target over the route costs above (time, risk, uncertainty, goal credit), so `V(here)` equals `find_route(here → target).cost`. With no reachable target, or an exit without the trophy, it is the cost to the nearest platform with an unexplored side (`explore`).
+- **Option value `Q(here, a)`:** the cost of doing `a` plus `V` of where it ends.
+  - A tried move ends where its edges most often landed; its cost is `edge_cost` of its outcomes from here with the held items (edges and unattributed failures summed).
+  - An untried move ends at the reach estimate's end cell (`estimate_end_at`); its cost adds the skill's frame cap as time. No safe landing, or a landing off the mapped platforms, gives no `Q`.
+  - An action that stays (shoot, `wait*`, a move that ends on the same platform) costs its time and its death risk, plus `V(here)`. A shot predicted to hit a monster (`threats.shot_hits`) is cheaper by the whole `graph.kill_bonus` (0.5, not calibrated). Any other shot from a platform where shots killed a monster before is cheaper by `kill_bonus` times the kill rate. Kills are recorded on the start node as `shots` and `kills` (a monster at the shot's start missing at its end; optional attributes).
+  - On the target's platform, the walk to the goal tile is added (24 frames per tile), so walking toward the item beats walking away.
+- **Regret** `Q − min Q`: 0 for the best option from this position.
+- **Note** (first after the leading danger and route notes, at most 60 characters): `score: best (2.1 to goal; ok 4/5)`, `score: +1.3 vs best (ok 1/4, died 3)`, `score: ? (no safe landing; untried)`.
+- The live viewer shows a `best` / `+regret` badge on each option and, on the card, whether the model picked the graph's best (`docs/live.md`).
+
 ## Checkpoints
 
 - **Store layout:** a store is a directory with one checkpoint per level, `<dir>/<level_id>.json`. A store path written `X.json` means the directory `X/`. A legacy combined checkpoint at `X.json` (one graph for all levels) is split by node `level_id` on load: edges are kept only between nodes of the same level. It is then written back as the directory, so earlier learning is kept.
@@ -94,11 +108,12 @@ Each level's graph is a NetworkX `MultiDiGraph`. It is used only by graph-enable
 
   The JSON is sorted, so identical learning gives byte-identical files (tested on the real game).
 - **Atomic save:** for each level file, write `<path>.tmp` and fsync it, copy the current file to `<path>.bak`, then `os.replace`. An interrupted save leaves the previous checkpoint intact (tested). Lineage is added to every level in the store at save time.
-- **Load:** a schema, adapter, build or observation-policy mismatch is rejected with `GraphCheckpointError`. Learned routes do not transfer across builds.
+- **Load:** a schema, adapter, build, observation-policy or execution-mode mismatch is rejected with `GraphCheckpointError`. Learned routes do not transfer across builds.
+- **Execution mode:** each checkpoint records `execution_mode`: `paused_step` (the game is paused while models think: `play`, `benchmark`, and the live viewer by default) or `real_time` (the live viewer with "Pause game while models think" off). In real time the game runs on during a model's wait, so monsters and shots move, Dave can die before the move, and moves start from a later state. The two learn different success, death and timing numbers, so they never share a store. A checkpoint written before the field existed is `paused_step`.
 - **Build id** (deadly-dave, `adapters/dave.py` `build_id`): `deadly-dave-<hash>`, a hash of the game's own sources and levels (`*.c` except `bridge.c`, `include/`, `res/levels/`, line endings normalised). Rebuilding or re-patching the bridge, which only reports state, keeps it; changing the physics or the levels changes it. The bridge protocol is checked separately at the handshake. Without the sources, the bridge executable's hash is used (`deadly-dave-bridge-p<protocol>-<hash>`, the scheme before 2026-10-04).
 - **Re-key:** `dave-agent graph --checkpoint DIR --rekey dave` ties a store to the current build id and keeps every node and edge. Each level file is first copied to `<level>.json.prekey`, and the adapter and observation policy must already match. Use it only when the game's physics and levels did not change, e.g. for checkpoints written under the old executable-hash id.
 - **YAML:** `export_yaml` (one level) and `export_store_yaml` (every level) are for inspection only.
-- **Per-arm stores:** `dave-agent play --arm C` loads or creates `artifacts/graphs/arm-C/<adapter>/` (`level1.json`, `level2.json`, …), or `--graph PATH` / `memory.graph_checkpoint` if set. It learns when `memory.graph_updates` is true, then saves. Use one store per arm and trial; arms A and B never create or read one.
+- **Per-arm, per-mode stores:** `dave-agent play --arm C` loads or creates `artifacts/graphs/arm-C/<adapter>/` (`level1.json`, `level2.json`, …), or `--graph PATH` / `memory.graph_checkpoint` if set. Real-time play uses `artifacts/graphs/arm-C/<adapter>-realtime/` instead (`session.graph_store_path`), so pausing or not never mixes the two. It learns when `memory.graph_updates` is true, then saves. Use one store per arm and trial; arms A and B never create or read one.
 
 ```bash
 uv run dave-agent play --arm C --mock --adapter dave --scenario level1

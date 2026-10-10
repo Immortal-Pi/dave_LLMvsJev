@@ -481,6 +481,32 @@ Checks:
 - Offline traces: fixture 41/17 `38b901ad24333f4f` and level 1 `97b1dc188deb88ba` are unchanged. Level 2 is `de71bd676c0b1599`, the same with the new features patched out, so it already changed with the threat screen; the `2a57449186e2a6b3` above predates it.
 - Not run: a paid live Jev run with the new notes.
 
+## Live viewer: pause off (2026-10-06)
+
+Phase 11 item 1 has started, in the live viewer only. The `/live` toggle **Pause game while models think** (`POST /start` `pause: false`) runs one episode with `execution_mode: real_time`:
+- Planner and tactical calls run on a worker thread. Meanwhile the game ticks on with no keys pressed.
+- A late choice is revalidated on the latest observation. It is dropped and decided again (`decision_stale`) after a death or respawn, or when its skill is illegal or screened. Otherwise it runs, and `decision_latency` records the wait.
+- Inspect and replay refuse these runs. `play` and `benchmark` are unchanged (paused). See `docs/live.md`.
+
+Checks:
+- `uv run pytest`: all pass, including `tests/unit/test_realtime.py` (4).
+- Real game, level 1, rule planner, a mock controller sleeping 0.2 s (Jev-like), 1500 frames: 20 decisions, each waiting about 16 ticks, no stale choices, no deaths.
+- Not run: a paid live Jev or Azure run with pause off.
+
+## Planner: rule first, loot, prerequisites, fuel; graph memory per execution mode (2026-10-08)
+
+Live runs showed the Azure planner choosing loot almost a whole level-4 run, sending waypoints through walls, and both planners spending goals on a flight-only trophy before Dave had the jetpack (`docs/planner.md`):
+- **Rule first** (`planning.llm_calls: escalate`, `configs/watch.yaml`, `configs/benchmark_dave.yaml`): the rule priority chooses with no call; the planner model is called on `stuck`, `repeated_failures` or a death, or when the rule's choice already failed `rule_repeat_limit` (2) times on the level. `goal_set` records `planner: rule | llm | fallback`. `configs/experiments.yaml` (fixture scale, the tests' config) stays `always`.
+- **Loot:** the prompt says the trophy and the door finish a level and loot is score only; loot with no known path is no longer offered.
+- **`requires`:** an item or door goal reachable only by flight while Dave has no fuel requires the jetpack (its path says where it is), and the rule takes the jetpack first.
+- **Azure planner:** no map grid when platforms are sent (`models.planner.send_map: false`), waypoints are platform ids only, `reasoning_effort_stuck: medium` on stuck triggers (`max_completion_tokens` 4000).
+- **Fuel:** the shared game rules state the jetpack's fuel use; the planner sees `player.fuel` (`left`, `reserve`) and is told to keep fuel for a flight the trophy or door may need; the tactical task says to turn the jetpack on only on a `route:` note and land rather than hover; an off-route `jetpack_on` option says `uses fuel (N left): not needed for the planned route`.
+- **`scripts/replan.py`:** re-asks the recorded planner requests of an inspection bundle with the current prompt (paid; not run yet).
+- **Graph memory per execution mode:** checkpoints record `execution_mode` and a mismatch is refused; real-time play (live viewer, pause off) uses `artifacts/graphs/arm-<ARM>/<adapter>-realtime/`, paused play keeps `artifacts/graphs/arm-<ARM>/<adapter>/` (`docs/graph.md`). The live graph panel says "paused memory" or "real-time memory".
+- **Graph reset:** arm C's store (`artifacts/graphs/arm-C/dave/`, levels 1-6, 15 live runs, one of them pause off) was deleted on request, so both memories start empty. Old arm-C runs can no longer be inspected exactly (`inspect` needs the store from before the run).
+
+Checks: 375 tests pass. `follow_route.py` (rule planner, route follower): levels 1 and 2 give the same results as before (level 1 in 478 frames, level 2 in 3805, no deaths); the level 3 and 4 runs after the change were stopped before they finished. Before the change the follower completed level 3 (3 deaths) re-picking `collect:loot:c19:r4` about 27 times, and on level 4 it set the flight-only trophy 10 times, took the jetpack late and did not finish in 18,000 frames. Not run: a live planner run with the new prompt.
+
 ## Verification (run 2026-10-03)
 
 ```bash
@@ -665,7 +691,7 @@ Live evidence covers **arms A, B and C** (labeled `mode=live`): one smoke episod
 - Mock tactical controllers ignore goals, so mock runs mostly show `stuck` and expiry triggers.
 - `explore` targets are a direction and a column, not a verified reachable location.
 - Azure cost is not computed (no price table); token usage is recorded per call, so `max_cost_usd_per_episode` cannot fire for Azure.
-- Live Azure tactical calls average about 2.5–2.8 s, mostly reasoning tokens (about 380–430 per call at `reasoning_effort: low`). Lower settings were not tested on this deployment. Jev calls average about 0.2 s, but the game is paused during decisions, so latency does not affect play yet (Phase 11).
+- Live Azure tactical calls average about 2.5–2.8 s, mostly reasoning tokens (about 380–430 per call at `reasoning_effort: low`). Lower settings were not tested on this deployment. Jev calls average about 0.2 s. The game is paused during decisions everywhere except the live viewer with pause off (2026-10-06), so latency does not affect benchmark play yet (Phase 11).
 - Jev's chosen-candidate probabilities on Dave were mostly 0.24–0.52, spread across walking and jumping skills.
 - The planner (live and rule-based) always prioritises the trophy, so Dave no longer wanders into coins as the random mock did. This is intended: coins only add score.
 - The route-relevant facts the models lack are which jump lands where (narrow pillars), and the hidden landing cooldown, which `wait_short` covers but which is not observable.

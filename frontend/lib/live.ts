@@ -37,6 +37,8 @@ export type RunInfo = {
   planner: string;
   tactical: string;
   arm_config: { planner: string; tactical: string; graph_enabled: boolean };
+  /** false: the game runs on while models think (absent on older servers: paused). */
+  pause?: boolean;
 };
 
 export type LevelMapView = {
@@ -94,6 +96,8 @@ export type PlanEvent = {
   fallback_reason: string | null;
   attempts: number;
   errors: string[];
+  /** Who chose: the planner model, the rule priority without a call (planning.llm_calls: escalate), or the fallback. */
+  planner?: "llm" | "rule" | "fallback";
   model_ms: number;
   calls: CallView[];
   candidates: { id: string; description: string; route: Record<string, unknown> | null; path?: string | null }[];
@@ -105,10 +109,23 @@ export type PlanEvent = {
   deaths?: { cause: string; tile: Tile | null }[];
 };
 
+/** The live graph's score of one option (graph arms; control/move_score.py): ``q`` is the cost
+ * to the goal after it (lower is better), ``regret`` how much worse than the best option. */
+export type MoveScore = {
+  q: number | null;
+  regret: number | null;
+  best: boolean;
+  p_ok: number;
+  attempts: number;
+  fatal: number;
+  land: string | null;
+  mode: "goal" | "explore";
+};
+
 export type DecisionEvent = ObsView & {
   observation_id: number;
   goal: { target: string; type: string; waypoint: Tile | null } | null;
-  candidates: { id: string; skill: string; description: string }[];
+  candidates: { id: string; skill: string; description: string; score?: MoveScore | null }[];
   screened: Record<string, string>;
   chosen: string;
   forced: boolean;
@@ -117,6 +134,12 @@ export type DecisionEvent = ObsView & {
   probabilities: Record<string, number> | null;
   calls: CallView[];
   threats?: ThreatPath[];
+  /** Pause off only: game ticks that passed while the model thought. */
+  wait_ticks?: number;
+  /** Pause off only: the candidate id the choice ran as on the latest observation. */
+  runs?: string;
+  /** Pause off only: why the choice came too late and was dropped (then decided again). */
+  stale?: string;
 };
 
 export type OutcomeEvent = ObsView & {
@@ -180,6 +203,8 @@ export type GraphCounts = {
 
 export type GraphEvent = {
   source: "learning" | "frozen";
+  /** Which memory: learned with the game paused while models think, or running on (a separate store). */
+  execution_mode?: "paused_step" | "real_time";
   level_id: string;
   graph: { level_id: string; topology_version: number; counts: GraphCounts; nodes: GraphNode[]; edges: GraphEdge[] } | null;
   /** What the last skill added (absent on the episode-start snapshot). */
@@ -402,7 +427,7 @@ function step(state: LiveState, action: Action): LiveState {
       const feed = [...state.feed];
       for (let i = feed.length - 1; i >= 0; i--) {
         const item = feed[i];
-        if (item.kind === "decision" && !item.outcome && item.d.chosen === o.candidate_id) {
+        if (item.kind === "decision" && !item.outcome && !item.d.stale && (item.d.runs ?? item.d.chosen) === o.candidate_id) {
           feed[i] = { ...item, outcome: o };
           break;
         }
@@ -458,7 +483,7 @@ export async function getStatus(): Promise<ServerStatus> {
   return res.json();
 }
 
-export async function startRun(body: { scenario: string; arm: string; planner: string; tactical: string }): Promise<string | null> {
+export async function startRun(body: { scenario: string; arm: string; planner: string; tactical: string; pause: boolean }): Promise<string | null> {
   const res = await fetch(`${LIVE_URL}/start`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
