@@ -168,7 +168,8 @@ export function GraphPanel({ live }: { live: LiveState }) {
       <h2>
         Learned graph{" "}
         <span className="muted small">
-          {g.level_id} · {event.source === "learning" ? "learning this run" : "frozen checkpoint"} · topology v{g.topology_version}
+          {g.level_id} · {event.execution_mode === "real_time" ? "real-time memory" : "paused memory"} ·{" "}
+          {event.source === "learning" ? "learning this run" : "frozen checkpoint"} · topology v{g.topology_version}
         </span>
       </h2>
       <div className="planner-grid">

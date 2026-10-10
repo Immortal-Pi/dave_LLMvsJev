@@ -493,6 +493,20 @@ Checks:
 - Real game, level 1, rule planner, a mock controller sleeping 0.2 s (Jev-like), 1500 frames: 20 decisions, each waiting about 16 ticks, no stale choices, no deaths.
 - Not run: a paid live Jev or Azure run with pause off.
 
+## Planner: rule first, loot, prerequisites, fuel; graph memory per execution mode (2026-10-08)
+
+Live runs showed the Azure planner choosing loot almost a whole level-4 run, sending waypoints through walls, and both planners spending goals on a flight-only trophy before Dave had the jetpack (`docs/planner.md`):
+- **Rule first** (`planning.llm_calls: escalate`, `configs/watch.yaml`, `configs/benchmark_dave.yaml`): the rule priority chooses with no call; the planner model is called on `stuck`, `repeated_failures` or a death, or when the rule's choice already failed `rule_repeat_limit` (2) times on the level. `goal_set` records `planner: rule | llm | fallback`. `configs/experiments.yaml` (fixture scale, the tests' config) stays `always`.
+- **Loot:** the prompt says the trophy and the door finish a level and loot is score only; loot with no known path is no longer offered.
+- **`requires`:** an item or door goal reachable only by flight while Dave has no fuel requires the jetpack (its path says where it is), and the rule takes the jetpack first.
+- **Azure planner:** no map grid when platforms are sent (`models.planner.send_map: false`), waypoints are platform ids only, `reasoning_effort_stuck: medium` on stuck triggers (`max_completion_tokens` 4000).
+- **Fuel:** the shared game rules state the jetpack's fuel use; the planner sees `player.fuel` (`left`, `reserve`) and is told to keep fuel for a flight the trophy or door may need; the tactical task says to turn the jetpack on only on a `route:` note and land rather than hover; an off-route `jetpack_on` option says `uses fuel (N left): not needed for the planned route`.
+- **`scripts/replan.py`:** re-asks the recorded planner requests of an inspection bundle with the current prompt (paid; not run yet).
+- **Graph memory per execution mode:** checkpoints record `execution_mode` and a mismatch is refused; real-time play (live viewer, pause off) uses `artifacts/graphs/arm-<ARM>/<adapter>-realtime/`, paused play keeps `artifacts/graphs/arm-<ARM>/<adapter>/` (`docs/graph.md`). The live graph panel says "paused memory" or "real-time memory".
+- **Graph reset:** arm C's store (`artifacts/graphs/arm-C/dave/`, levels 1-6, 15 live runs, one of them pause off) was deleted on request, so both memories start empty. Old arm-C runs can no longer be inspected exactly (`inspect` needs the store from before the run).
+
+Checks: 375 tests pass. `follow_route.py` (rule planner, route follower): levels 1 and 2 give the same results as before (level 1 in 478 frames, level 2 in 3805, no deaths); the level 3 and 4 runs after the change were stopped before they finished. Before the change the follower completed level 3 (3 deaths) re-picking `collect:loot:c19:r4` about 27 times, and on level 4 it set the flight-only trophy 10 times, took the jetpack late and did not finish in 18,000 frames. Not run: a live planner run with the new prompt.
+
 ## Verification (run 2026-10-03)
 
 ```bash

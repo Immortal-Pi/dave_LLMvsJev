@@ -69,7 +69,7 @@ Untick **Pause game while models think** (`POST /start` with `"pause": false`) t
 - `--allow-paid`: live models (Azure planner, Azure or Jev tactical) are paid calls. They are refused unless the server was started with this flag.
 - `--tick-ms 0` runs as fast as the game steps.
 
-**Graph arm C** reads and updates its own store next to the live episode store. By default that is `artifacts/graphs/arm-C/dave/`, the same store `play` uses. With a custom `--store`, pass the matching `--graph` to `inspect`.
+**Graph arm C** reads and updates its own store next to the live episode store. With the game paused while models think (the default) that is `artifacts/graphs/arm-C/dave/`, the same store `play` uses; with pause off it is `artifacts/graphs/arm-C/dave-realtime/`, a separate memory, because real-time play learns different outcomes and timing (`docs/graph.md`, "Execution mode"). The graph panel says which: "paused memory" or "real-time memory". With a custom `--store`, pass the matching `--graph` to `inspect`.
 
 ## Page: `frontend/app/live/page.tsx`
 

@@ -443,7 +443,7 @@ def _call_view(call: ModelCallRecord) -> dict[str, Any]:
 def _graph_view(store: GraphStore, level_id: str, learning: bool) -> dict[str, Any]:
     level = store.get(level_id)
     return {"source": "learning" if learning else "frozen", "level_id": level_id,
-            "graph": None if level is None else level.view()}
+            "execution_mode": store.execution_mode, "graph": None if level is None else level.view()}
 
 
 def _graph_last(store: GraphStore, start, run: ExecutionResult, recorded: str | None) -> dict[str, Any]:

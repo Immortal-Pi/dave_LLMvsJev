@@ -8,7 +8,7 @@ The code is in `src/dave_agent/memory/`:
 | `detector.py` | `EventDetector` |
 | `episodes.py` | `EpisodeStore` and `EpisodeRecorder` |
 
-Replay lives in `src/dave_agent/runner/replay.py`. Learned graph memory is Phase 5 and is not covered here.
+Replay lives in `src/dave_agent/runner/replay.py`. Learned graph memory is Phase 5 and is not covered here (`docs/graph.md`); it is the only memory kept across runs, with a separate store for paused and real-time play.
 
 ## Working memory (in-process, per episode)
 

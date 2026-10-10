@@ -223,7 +223,7 @@ class BenchmarkRunner:
         info = {}
         for arm, path in sorted(self.spec.checkpoints.items()):
             graph = load_store(path, caps["adapter"], caps["build_id"],
-                               self.config.environment.observation_policy)
+                               self.config.environment.observation_policy, self.config.environment.execution_mode)
             others = sorted({e["arm"] for e in graph.lineage} - {arm})
             if others and not self.spec.shared_checkpoint:
                 raise GraphCheckpointError(
@@ -377,10 +377,10 @@ class BenchmarkRunner:
             if graph_arm:
                 if spec.regime == "warm":  # a fresh copy each episode: nothing carries over between trials
                     graph = load_store(spec.checkpoints[arm], caps["adapter"], caps["build_id"],
-                                       cfg.environment.observation_policy)
+                                       cfg.environment.observation_policy, cfg.environment.execution_mode)
                 else:
                     graph = GraphStore(caps["adapter"], caps["build_id"], cfg.environment.observation_policy,
-                                       cfg.graph.evidence_per_item)
+                                       cfg.graph.evidence_per_item, cfg.environment.execution_mode)
                     learn = cfg.memory.graph_updates
             result, recorder = run_trial(cfg, arm, models, adapter, spec.adapter, scenario, seed, store, run_id,
                                          "benchmark", graph, learn, spec.reach_hints,
@@ -454,9 +454,9 @@ def train_memory(config: AppConfig, arm: str, episodes: int, scenarios: tuple[st
             adapter = adapter_factory(adapter_name, config.environment)
             try:
                 caps = adapter.capabilities()
-                policy = config.environment.observation_policy
-                graph = (load_store(checkpoint, caps.adapter, caps.build_id, policy) if store_exists(checkpoint)
-                         else GraphStore(caps.adapter, caps.build_id, policy, config.graph.evidence_per_item))
+                policy, mode = config.environment.observation_policy, config.environment.execution_mode
+                graph = (load_store(checkpoint, caps.adapter, caps.build_id, policy, mode) if store_exists(checkpoint)
+                         else GraphStore(caps.adapter, caps.build_id, policy, config.graph.evidence_per_item, mode))
                 run_id = f"{prefix}-{arm}-e{i:03d}"
                 result, recorder = run_trial(config, arm, models, adapter, adapter_name, scenario, seed, store,
                                              run_id, "train-memory", graph, True)

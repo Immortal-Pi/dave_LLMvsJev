@@ -74,10 +74,13 @@ class WorldGraph:
     checkpoints); a ``GraphStore`` always sets it, so observing another level is a bug."""
 
     def __init__(self, adapter: str, build_id: str, observation_policy: str, evidence_limit: int = 20,
-                 level_id: str | None = None) -> None:
+                 level_id: str | None = None, execution_mode: str = "paused_step") -> None:
         self.adapter, self.build_id, self.observation_policy = adapter, build_id, observation_policy
         self.evidence_limit = evidence_limit
         self.level_id = level_id
+        # Learned with the game paused while models think (paused_step) or running on (real_time):
+        # outcomes and timing differ, so the two are never mixed (docs/graph.md).
+        self.execution_mode = execution_mode
         self.g = nx.MultiDiGraph()
         self.aliases: dict[str, str] = {}
         self.suggestions: list[dict[str, Any]] = []
@@ -435,15 +438,17 @@ class GraphStore:
     episode loop and the goal manager use it like a graph: every call is routed by the
     observation's ``level_id``, so no node, edge, frontier or route ever spans two levels."""
 
-    def __init__(self, adapter: str, build_id: str, observation_policy: str, evidence_limit: int = 20) -> None:
+    def __init__(self, adapter: str, build_id: str, observation_policy: str, evidence_limit: int = 20,
+                 execution_mode: str = "paused_step") -> None:
         self.adapter, self.build_id, self.observation_policy = adapter, build_id, observation_policy
         self.evidence_limit = evidence_limit
+        self.execution_mode = execution_mode
         self.levels: dict[str, WorldGraph] = {}
 
     def for_level(self, level_id: str) -> WorldGraph:
         if level_id not in self.levels:
             self.levels[level_id] = WorldGraph(self.adapter, self.build_id, self.observation_policy,
-                                               self.evidence_limit, level_id)
+                                               self.evidence_limit, level_id, self.execution_mode)
         return self.levels[level_id]
 
     def get(self, level_id: str) -> WorldGraph | None:

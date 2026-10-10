@@ -1,0 +1,845 @@
+{
+  "store": "artifacts/live.sqlite",
+  "episodes_used": 173,
+  "episodes_by_setup": {
+    "hybrid": 142,
+    "jev_rule": 24,
+    "llm_only": 7
+  },
+  "calls": {
+    "jev": {
+      "calls": 19054,
+      "latency_ms_mean": 202,
+      "latency_ms_p50": 185,
+      "latency_ms_p90": 250,
+      "cost_usd_reported_total": 2.221,
+      "cost_usd_per_call_reported": 0.000117,
+      "priced_calls": 19054,
+      "cost_usd_per_call_estimated": null,
+      "models": [
+        "typesafe/jev-1.13-20260917"
+      ]
+    },
+    "llm_planner": {
+      "calls": 1750,
+      "latency_ms_mean": 2694,
+      "latency_ms_p50": 2403,
+      "latency_ms_p90": 4032,
+      "cost_usd_reported_total": 5.7233,
+      "cost_usd_per_call_reported": 0.009429,
+      "priced_calls": 607,
+      "cost_usd_per_call_estimated": 0.010293,
+      "models": [
+        "gpt-5.4-mini",
+        "gpt-6-sol"
+      ]
+    },
+    "llm_tactical": {
+      "calls": 140,
+      "latency_ms_mean": 2152,
+      "latency_ms_p50": 1703,
+      "latency_ms_p90": 3355,
+      "cost_usd_reported_total": 0.1582,
+      "cost_usd_per_call_reported": 0.004276,
+      "priced_calls": 37,
+      "cost_usd_per_call_estimated": 0.00462,
+      "models": [
+        "gpt-5.4-mini",
+        "gpt-6-sol"
+      ]
+    }
+  },
+  "llm_tactical_price_assumed": {
+    "input_per_mtok": 2.0,
+    "output_per_mtok": 10.0
+  },
+  "calls_per_level_hybrid": {
+    "level1": {
+      "episodes": 10,
+      "completed": 10,
+      "jev_calls_median": 16.0,
+      "llm_calls_median": 3.0,
+      "jev_calls_total": 176,
+      "llm_calls_total": 28
+    },
+    "level2": {
+      "episodes": 23,
+      "completed": 11,
+      "jev_calls_median": 79,
+      "llm_calls_median": 10,
+      "jev_calls_total": 2031,
+      "llm_calls_total": 272
+    },
+    "level3": {
+      "episodes": 30,
+      "completed": 5,
+      "jev_calls_median": 104.5,
+      "llm_calls_median": 12.0,
+      "jev_calls_total": 3320,
+      "llm_calls_total": 418
+    },
+    "level4": {
+      "episodes": 43,
+      "completed": 0,
+      "jev_calls_median": 120,
+      "llm_calls_median": 11,
+      "jev_calls_total": 7259,
+      "llm_calls_total": 607
+    },
+    "level5": {
+      "episodes": 29,
+      "completed": 1,
+      "jev_calls_median": 76,
+      "llm_calls_median": 11,
+      "jev_calls_total": 2804,
+      "llm_calls_total": 335
+    },
+    "level6": {
+      "episodes": 4,
+      "completed": 0,
+      "jev_calls_median": 54.5,
+      "llm_calls_median": 9.5,
+      "jev_calls_total": 233,
+      "llm_calls_total": 34
+    },
+    "level7": {
+      "episodes": 2,
+      "completed": 0,
+      "jev_calls_median": 40.5,
+      "llm_calls_median": 4.0,
+      "jev_calls_total": 81,
+      "llm_calls_total": 8
+    },
+    "level8": {
+      "episodes": 1,
+      "completed": 0,
+      "jev_calls_median": 285,
+      "llm_calls_median": 28,
+      "jev_calls_total": 285,
+      "llm_calls_total": 28
+    }
+  },
+  "outcomes": {
+    "jev_rule": {
+      "level1": {
+        "completed": 1
+      },
+      "level4": {
+        "stopped": 10
+      },
+      "level3": {
+        "stopped": 4,
+        "completed": 2,
+        "game over": 1
+      },
+      "level5": {
+        "stopped": 3,
+        "game over": 3
+      }
+    },
+    "hybrid": {
+      "level1": {
+        "completed": 10
+      },
+      "level2": {
+        "stopped": 12,
+        "completed": 11
+      },
+      "level3": {
+        "stopped": 24,
+        "completed": 5,
+        "game over": 1
+      },
+      "level4": {
+        "stopped": 40,
+        "game over": 3
+      },
+      "level5": {
+        "stopped": 17,
+        "game over": 11,
+        "completed": 1
+      },
+      "level6": {
+        "stopped": 2,
+        "game over": 2
+      },
+      "level7": {
+        "stopped": 2
+      },
+      "level8": {
+        "stopped": 1
+      }
+    },
+    "llm_only": {
+      "level1": {
+        "completed": 2
+      },
+      "level2": {
+        "stopped": 2
+      },
+      "level3": {
+        "stopped": 1
+      },
+      "level5": {
+        "stopped": 1
+      },
+      "level4": {
+        "stopped": 1
+      }
+    }
+  },
+  "deaths": {
+    "jev_rule": {
+      "level1": 0,
+      "level4": 6,
+      "level3": 9,
+      "level5": 17
+    },
+    "hybrid": {
+      "level1": 0,
+      "level2": 2,
+      "level3": 33,
+      "level4": 36,
+      "level5": 82,
+      "level6": 11,
+      "level7": 2,
+      "level8": 1
+    },
+    "llm_only": {
+      "level1": 0,
+      "level2": 0,
+      "level3": 0,
+      "level5": 2,
+      "level4": 0
+    }
+  },
+  "case_studies": {
+    "level1": {
+      "run_id": "live-20261008T014020-24a001",
+      "llm_calls_mode": "always",
+      "completed": true,
+      "outcome": "level_complete",
+      "termination_reason": "terminal:level_complete",
+      "frames": 556,
+      "deaths": 0,
+      "decisions": 9,
+      "forced_decisions": 0,
+      "jev_calls": 9,
+      "jev_cost": 0.0015,
+      "jev_seconds": 1.9,
+      "jev_cost_per_call": 0.000163,
+      "llm_calls": 2,
+      "llm_cost": 0.0143,
+      "llm_seconds": 3.5,
+      "llm_cost_per_call": 0.00714,
+      "total_cost": 0.0157,
+      "total_seconds": 5.4,
+      "llm_share_of_cost": 0.907,
+      "jev_calls_per_llm_call": 4.5,
+      "llm_only_seconds_projected": 22.9,
+      "llm_only_cost_projected": 0.0559
+    },
+    "level2": {
+      "run_id": "live-20261008T204413-99ed80",
+      "llm_calls_mode": "escalate",
+      "completed": true,
+      "outcome": "level_complete",
+      "termination_reason": "terminal:level_complete",
+      "frames": 3971,
+      "deaths": 0,
+      "decisions": 96,
+      "forced_decisions": 0,
+      "jev_calls": 96,
+      "jev_cost": 0.0149,
+      "jev_seconds": 21.3,
+      "jev_cost_per_call": 0.000155,
+      "llm_calls": 1,
+      "llm_cost": 0.0058,
+      "llm_seconds": 2.0,
+      "llm_cost_per_call": 0.00585,
+      "total_cost": 0.0207,
+      "total_seconds": 23.2,
+      "llm_share_of_cost": 0.282,
+      "jev_calls_per_llm_call": 96.0,
+      "llm_only_seconds_projected": 208.6,
+      "llm_only_cost_projected": 0.4494
+    },
+    "level3": {
+      "run_id": "live-20261008T214808-1ac49a",
+      "llm_calls_mode": "escalate",
+      "completed": true,
+      "outcome": "level_complete",
+      "termination_reason": "terminal:level_complete",
+      "frames": 5789,
+      "deaths": 2,
+      "decisions": 188,
+      "forced_decisions": 18,
+      "jev_calls": 170,
+      "jev_cost": 0.0204,
+      "jev_seconds": 36.4,
+      "jev_cost_per_call": 0.00012,
+      "llm_calls": 4,
+      "llm_cost": 0.0273,
+      "llm_seconds": 9.2,
+      "llm_cost_per_call": 0.00683,
+      "total_cost": 0.0477,
+      "total_seconds": 45.5,
+      "llm_share_of_cost": 0.572,
+      "jev_calls_per_llm_call": 42.5,
+      "llm_only_seconds_projected": 375.0,
+      "llm_only_cost_projected": 0.8127
+    },
+    "level4": {
+      "run_id": "live-20261008T215038-4b17d1",
+      "llm_calls_mode": "escalate",
+      "completed": false,
+      "outcome": "truncated",
+      "termination_reason": "max_frames:18000",
+      "frames": 18060,
+      "deaths": 1,
+      "decisions": 519,
+      "forced_decisions": 9,
+      "jev_calls": 510,
+      "jev_cost": 0.0753,
+      "jev_seconds": 105.1,
+      "jev_cost_per_call": 0.000148,
+      "llm_calls": 11,
+      "llm_cost": 0.142,
+      "llm_seconds": 34.5,
+      "llm_cost_per_call": 0.01291,
+      "total_cost": 0.2173,
+      "total_seconds": 139.7,
+      "llm_share_of_cost": 0.654,
+      "jev_calls_per_llm_call": 46.4,
+      "llm_only_seconds_projected": 1132.0,
+      "llm_only_cost_projected": 2.4982
+    },
+    "level2_always": {
+      "run_id": "live-20261008T014051-836fa4",
+      "llm_calls_mode": "always",
+      "completed": true,
+      "outcome": "level_complete",
+      "termination_reason": "terminal:level_complete",
+      "frames": 3130,
+      "deaths": 1,
+      "decisions": 80,
+      "forced_decisions": 9,
+      "jev_calls": 71,
+      "jev_cost": 0.0101,
+      "jev_seconds": 14.6,
+      "jev_cost_per_call": 0.000143,
+      "llm_calls": 7,
+      "llm_cost": 0.0651,
+      "llm_seconds": 16.5,
+      "llm_cost_per_call": 0.0093,
+      "total_cost": 0.0752,
+      "total_seconds": 31.1,
+      "llm_share_of_cost": 0.865,
+      "jev_calls_per_llm_call": 10.1,
+      "llm_only_seconds_projected": 169.3,
+      "llm_only_cost_projected": 0.3931
+    }
+  },
+  "runs": {
+    "jev_rule": [
+      {
+        "run_id": "live-20261004T023624-ec5670",
+        "level": "level1",
+        "outcome": "level_complete",
+        "reason": "terminal:level_complete",
+        "frames": 574,
+        "deaths": 0,
+        "decisions": 20,
+        "jev_calls": 20,
+        "jev_cost": 0.0019,
+        "jev_ms": 3883.7,
+        "llm_calls": 0,
+        "llm_cost": 0.0,
+        "llm_ms": 0.0,
+        "llm_tactical_calls": 0
+      },
+      {
+        "run_id": "live-20261004T142033-5ce97f",
+        "level": "level4",
+        "outcome": "truncated",
+        "reason": "interrupted",
+        "frames": 1127,
+        "deaths": 0,
+        "decisions": 21,
+        "jev_calls": 21,
+        "jev_cost": 0.0021,
+        "jev_ms": 3507.0,
+        "llm_calls": 0,
+        "llm_cost": 0.0,
+        "llm_ms": 0.0,
+        "llm_tactical_calls": 0
+      },
+      {
+        "run_id": "live-20261004T145111-22c6c5",
+        "level": "level3",
+        "outcome": "truncated",
+        "reason": "interrupted",
+        "frames": 724,
+        "deaths": 0,
+        "decisions": 38,
+        "jev_calls": 38,
+        "jev_cost": 0.0035,
+        "jev_ms": 7579.2,
+        "llm_calls": 0,
+        "llm_cost": 0.0,
+        "llm_ms": 0.0,
+        "llm_tactical_calls": 0
+      },
+      {
+        "run_id": "live-20261004T163928-e3bbed",
+        "level": "level4",
+        "outcome": "truncated",
+        "reason": "interrupted",
+        "frames": 4344,
+        "deaths": 1,
+        "decisions": 121,
+        "jev_calls": 112,
+        "jev_cost": 0.0111,
+        "jev_ms": 19382.0,
+        "llm_calls": 0,
+        "llm_cost": 0.0,
+        "llm_ms": 0.0,
+        "llm_tactical_calls": 0
+      },
+      {
+        "run_id": "live-20261004T164124-94aa14",
+        "level": "level4",
+        "outcome": "truncated",
+        "reason": "interrupted",
+        "frames": 2621,
+        "deaths": 0,
+        "decisions": 85,
+        "jev_calls": 85,
+        "jev_cost": 0.0093,
+        "jev_ms": 15597.3,
+        "llm_calls": 0,
+        "llm_cost": 0.0,
+        "llm_ms": 0.0,
+        "llm_tactical_calls": 0
+      },
+      {
+        "run_id": "live-20261004T173804-68c24e",
+        "level": "level3",
+        "outcome": "truncated",
+        "reason": "interrupted",
+        "frames": 8011,
+        "deaths": 0,
+        "decisions": 248,
+        "jev_calls": 248,
+        "jev_cost": 0.0224,
+        "jev_ms": 43472.1,
+        "llm_calls": 0,
+        "llm_cost": 0.0,
+        "llm_ms": 0.0,
+        "llm_tactical_calls": 0
+      },
+      {
+        "run_id": "live-20261004T183416-f35160",
+        "level": "level3",
+        "outcome": "truncated",
+        "reason": "interrupted",
+        "frames": 8917,
+        "deaths": 1,
+        "decisions": 297,
+        "jev_calls": 288,
+        "jev_cost": 0.0282,
+        "jev_ms": 54203.4,
+        "llm_calls": 0,
+        "llm_cost": 0.0,
+        "llm_ms": 0.0,
+        "llm_tactical_calls": 0
+      },
+      {
+        "run_id": "live-20261004T183734-4fd083",
+        "level": "level4",
+        "outcome": "truncated",
+        "reason": "interrupted",
+        "frames": 14848,
+        "deaths": 3,
+        "decisions": 390,
+        "jev_calls": 363,
+        "jev_cost": 0.0396,
+        "jev_ms": 69274.1,
+        "llm_calls": 0,
+        "llm_cost": 0.0,
+        "llm_ms": 0.0,
+        "llm_tactical_calls": 0
+      },
+      {
+        "run_id": "live-20261004T184314-033936",
+        "level": "level3",
+        "outcome": "truncated",
+        "reason": "interrupted",
+        "frames": 5951,
+        "deaths": 0,
+        "decisions": 235,
+        "jev_calls": 235,
+        "jev_cost": 0.0268,
+        "jev_ms": 43164.3,
+        "llm_calls": 0,
+        "llm_cost": 0.0,
+        "llm_ms": 0.0,
+        "llm_tactical_calls": 0
+      },
+      {
+        "run_id": "live-20261004T185018-b680e8",
+        "level": "level5",
+        "outcome": "truncated",
+        "reason": "interrupted",
+        "frames": 337,
+        "deaths": 0,
+        "decisions": 5,
+        "jev_calls": 4,
+        "jev_cost": 0.0004,
+        "jev_ms": 885.4,
+        "llm_calls": 0,
+        "llm_cost": 0.0,
+        "llm_ms": 0.0,
+        "llm_tactical_calls": 0
+      },
+      {
+        "run_id": "live-20261004T185100-e17f66",
+        "level": "level5",
+        "outcome": "truncated",
+        "reason": "interrupted",
+        "frames": 5353,
+        "deaths": 2,
+        "decisions": 163,
+        "jev_calls": 145,
+        "jev_cost": 0.0137,
+        "jev_ms": 27214.7,
+        "llm_calls": 0,
+        "llm_cost": 0.0,
+        "llm_ms": 0.0,
+        "llm_tactical_calls": 0
+      },
+      {
+        "run_id": "live-20261004T203230-2f441b",
+        "level": "level5",
+        "outcome": "game_over",
+        "reason": "terminal:game_over",
+        "frames": 5754,
+        "deaths": 4,
+        "decisions": 140,
+        "jev_calls": 104,
+        "jev_cost": 0.0113,
+        "jev_ms": 18488.3,
+        "llm_calls": 0,
+        "llm_cost": 0.0,
+        "llm_ms": 0.0,
+        "llm_tactical_calls": 0
+      },
+      {
+        "run_id": "live-20261004T203431-60ace9",
+        "level": "level4",
+        "outcome": "truncated",
+        "reason": "interrupted",
+        "frames": 10632,
+        "deaths": 0,
+        "decisions": 266,
+        "jev_calls": 266,
+        "jev_cost": 0.0304,
+        "jev_ms": 46761.3,
+        "llm_calls": 0,
+        "llm_cost": 0.0,
+        "llm_ms": 0.0,
+        "llm_tactical_calls": 0
+      },
+      {
+        "run_id": "live-20261005T022346-30302d",
+        "level": "level5",
+        "outcome": "game_over",
+        "reason": "terminal:game_over",
+        "frames": 4166,
+        "deaths": 4,
+        "decisions": 96,
+        "jev_calls": 60,
+        "jev_cost": 0.0079,
+        "jev_ms": 11699.4,
+        "llm_calls": 0,
+        "llm_cost": 0.0,
+        "llm_ms": 0.0,
+        "llm_tactical_calls": 0
+      },
+      {
+        "run_id": "live-20261005T022518-2348bd",
+        "level": "level5",
+        "outcome": "truncated",
+        "reason": "interrupted",
+        "frames": 2773,
+        "deaths": 3,
+        "decisions": 60,
+        "jev_calls": 33,
+        "jev_cost": 0.0043,
+        "jev_ms": 6633.9,
+        "llm_calls": 0,
+        "llm_cost": 0.0,
+        "llm_ms": 0.0,
+        "llm_tactical_calls": 0
+      },
+      {
+        "run_id": "live-20261006T005228-3fd425",
+        "level": "level3",
+        "outcome": "level_complete",
+        "reason": "terminal:level_complete",
+        "frames": 6545,
+        "deaths": 3,
+        "decisions": 167,
+        "jev_calls": 140,
+        "jev_cost": 0.0147,
+        "jev_ms": 48341.8,
+        "llm_calls": 0,
+        "llm_cost": 0.0,
+        "llm_ms": 0.0,
+        "llm_tactical_calls": 0
+      },
+      {
+        "run_id": "live-20261006T005510-2b9afc",
+        "level": "level4",
+        "outcome": "truncated",
+        "reason": "interrupted",
+        "frames": 536,
+        "deaths": 0,
+        "decisions": 23,
+        "jev_calls": 23,
+        "jev_cost": 0.0028,
+        "jev_ms": 6809.5,
+        "llm_calls": 0,
+        "llm_cost": 0.0,
+        "llm_ms": 0.0,
+        "llm_tactical_calls": 0
+      },
+      {
+        "run_id": "live-20261007T001648-d9adf1",
+        "level": "level3",
+        "outcome": "game_over",
+        "reason": "terminal:game_over",
+        "frames": 5906,
+        "deaths": 4,
+        "decisions": 105,
+        "jev_calls": 76,
+        "jev_cost": 0.0079,
+        "jev_ms": 14551.9,
+        "llm_calls": 0,
+        "llm_cost": 0.0,
+        "llm_ms": 0.0,
+        "llm_tactical_calls": 0
+      },
+      {
+        "run_id": "live-20261007T003504-c51e5c",
+        "level": "level4",
+        "outcome": "truncated",
+        "reason": "interrupted",
+        "frames": 863,
+        "deaths": 0,
+        "decisions": 15,
+        "jev_calls": 15,
+        "jev_cost": 0.0019,
+        "jev_ms": 2854.9,
+        "llm_calls": 0,
+        "llm_cost": 0.0,
+        "llm_ms": 0.0,
+        "llm_tactical_calls": 0
+      },
+      {
+        "run_id": "live-20261007T003524-526840",
+        "level": "level4",
+        "outcome": "truncated",
+        "reason": "interrupted",
+        "frames": 310,
+        "deaths": 0,
+        "decisions": 7,
+        "jev_calls": 7,
+        "jev_cost": 0.0008,
+        "jev_ms": 1261.9,
+        "llm_calls": 0,
+        "llm_cost": 0.0,
+        "llm_ms": 0.0,
+        "llm_tactical_calls": 0
+      },
+      {
+        "run_id": "live-20261007T004351-c507db",
+        "level": "level4",
+        "outcome": "truncated",
+        "reason": "interrupted",
+        "frames": 10899,
+        "deaths": 2,
+        "decisions": 185,
+        "jev_calls": 180,
+        "jev_cost": 0.0235,
+        "jev_ms": 46517.0,
+        "llm_calls": 0,
+        "llm_cost": 0.0,
+        "llm_ms": 0.0,
+        "llm_tactical_calls": 0
+      },
+      {
+        "run_id": "live-20261007T004732-be0de0",
+        "level": "level5",
+        "outcome": "game_over",
+        "reason": "terminal:game_over",
+        "frames": 7742,
+        "deaths": 4,
+        "decisions": 114,
+        "jev_calls": 88,
+        "jev_cost": 0.0124,
+        "jev_ms": 22679.6,
+        "llm_calls": 0,
+        "llm_cost": 0.0,
+        "llm_ms": 0.0,
+        "llm_tactical_calls": 0
+      },
+      {
+        "run_id": "live-20261008T014944-a06c06",
+        "level": "level3",
+        "outcome": "level_complete",
+        "reason": "terminal:level_complete",
+        "frames": 4409,
+        "deaths": 1,
+        "decisions": 112,
+        "jev_calls": 103,
+        "jev_cost": 0.0134,
+        "jev_ms": 21190.8,
+        "llm_calls": 0,
+        "llm_cost": 0.0,
+        "llm_ms": 0.0,
+        "llm_tactical_calls": 0
+      },
+      {
+        "run_id": "live-20261008T015232-4b01a5",
+        "level": "level4",
+        "outcome": "truncated",
+        "reason": "interrupted",
+        "frames": 5701,
+        "deaths": 0,
+        "decisions": 211,
+        "jev_calls": 211,
+        "jev_cost": 0.028,
+        "jev_ms": 42418.2,
+        "llm_calls": 0,
+        "llm_cost": 0.0,
+        "llm_ms": 0.0,
+        "llm_tactical_calls": 0
+      }
+    ],
+    "llm_only": [
+      {
+        "run_id": "live-20261004T125306-6cdfeb",
+        "level": "level1",
+        "outcome": "level_complete",
+        "reason": "terminal:level_complete",
+        "frames": 644,
+        "deaths": 0,
+        "decisions": 18,
+        "jev_calls": 0,
+        "jev_cost": 0.0,
+        "jev_ms": 0.0,
+        "llm_calls": 2,
+        "llm_cost": 0.0264,
+        "llm_ms": 11213.2,
+        "llm_tactical_calls": 18
+      },
+      {
+        "run_id": "live-20261004T125412-d7ed1e",
+        "level": "level2",
+        "outcome": "truncated",
+        "reason": "interrupted",
+        "frames": 457,
+        "deaths": 0,
+        "decisions": 13,
+        "jev_calls": 0,
+        "jev_cost": 0.0,
+        "jev_ms": 0.0,
+        "llm_calls": 3,
+        "llm_cost": 0.0685,
+        "llm_ms": 29655.4,
+        "llm_tactical_calls": 13
+      },
+      {
+        "run_id": "live-20261004T141710-4ff6b8",
+        "level": "level3",
+        "outcome": "truncated",
+        "reason": "interrupted",
+        "frames": 414,
+        "deaths": 0,
+        "decisions": 10,
+        "jev_calls": 0,
+        "jev_cost": 0.0,
+        "jev_ms": 0.0,
+        "llm_calls": 1,
+        "llm_cost": 0.0057,
+        "llm_ms": 1535.4,
+        "llm_tactical_calls": 11
+      },
+      {
+        "run_id": "live-20261004T182150-f08b84",
+        "level": "level1",
+        "outcome": "level_complete",
+        "reason": "terminal:level_complete",
+        "frames": 574,
+        "deaths": 0,
+        "decisions": 15,
+        "jev_calls": 0,
+        "jev_cost": 0.0,
+        "jev_ms": 0.0,
+        "llm_calls": 2,
+        "llm_cost": 0.0154,
+        "llm_ms": 2757.9,
+        "llm_tactical_calls": 15
+      },
+      {
+        "run_id": "live-20261004T225759-a48c98",
+        "level": "level5",
+        "outcome": "truncated",
+        "reason": "interrupted",
+        "frames": 1768,
+        "deaths": 2,
+        "decisions": 39,
+        "jev_calls": 0,
+        "jev_cost": 0.0,
+        "jev_ms": 0.0,
+        "llm_calls": 5,
+        "llm_cost": 0.0306,
+        "llm_ms": 12023.1,
+        "llm_tactical_calls": 21
+      },
+      {
+        "run_id": "live-20261005T012822-800563",
+        "level": "level4",
+        "outcome": "truncated",
+        "reason": "interrupted",
+        "frames": 1129,
+        "deaths": 0,
+        "decisions": 25,
+        "jev_calls": 0,
+        "jev_cost": 0.0,
+        "jev_ms": 0.0,
+        "llm_calls": 7,
+        "llm_cost": 0.0573,
+        "llm_ms": 16185.6,
+        "llm_tactical_calls": 25
+      },
+      {
+        "run_id": "live-20261008T235850-21bda2",
+        "level": "level2",
+        "outcome": "truncated",
+        "reason": "interrupted",
+        "frames": 1528,
+        "deaths": 0,
+        "decisions": 37,
+        "jev_calls": 0,
+        "jev_cost": 0.0,
+        "jev_ms": 0.0,
+        "llm_calls": 0,
+        "llm_cost": 0.0,
+        "llm_ms": 0.0,
+        "llm_tactical_calls": 37
+      }
+    ]
+  }
+}

@@ -203,6 +203,8 @@ export type GraphCounts = {
 
 export type GraphEvent = {
   source: "learning" | "frozen";
+  /** Which memory: learned with the game paused while models think, or running on (a separate store). */
+  execution_mode?: "paused_step" | "real_time";
   level_id: string;
   graph: { level_id: string; topology_version: number; counts: GraphCounts; nodes: GraphNode[]; edges: GraphEdge[] } | null;
   /** What the last skill added (absent on the episode-start snapshot). */

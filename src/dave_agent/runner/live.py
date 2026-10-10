@@ -36,7 +36,8 @@ from dave_agent.adapters import create_adapter
 from dave_agent.config import AppConfig, ConfigError
 from dave_agent.memory.episodes import EpisodeStore
 from dave_agent.memory.persistence import save_store
-from dave_agent.runner.session import budget_notice, build_models, episode_summary, open_graph, run_trial
+from dave_agent.runner.session import budget_notice, build_models, episode_summary, graph_store_path, open_graph, \
+    run_trial
 
 log = logging.getLogger(__name__)
 
@@ -236,11 +237,13 @@ class LiveServer:
             adapter = self.adapter_factory(self.adapter_name, config.environment)
             live = LiveAdapter(adapter, self.hub, self.tick_ms, self.frame_every, self._stop, self._frame_dir)
             # The arm's own store, next to the live episode store (by default the same place as
-            # play's: artifacts/graphs/arm-<ARM>/<adapter>/), unless memory.graph_checkpoint is set.
+            # play's: artifacts/graphs/arm-<ARM>/<adapter>/, or <adapter>-realtime/ with pause off),
+            # unless memory.graph_checkpoint is set.
             graph, graph_path, learn = open_graph(
                 config, arm, adapter, self.adapter_name,
                 config.memory.graph_checkpoint
-                or self.store_path.parent / "graphs" / f"arm-{arm}" / f"{self.adapter_name}.json")
+                or graph_store_path(self.store_path.parent, arm, self.adapter_name,
+                                    config.environment.execution_mode))
             def on_event(kind: str, data: dict[str, Any]) -> None:
                 if kind == "deciding":
                     live.capture(data["frame"])  # the frame the models decide on

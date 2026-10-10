@@ -26,6 +26,7 @@ Detailed documentation lives in `docs/`. Read the relevant file before working i
 - [docs/state_mapping.md](docs/state_mapping.md): deadly-dave C fields mapped to `Observation` fields.
 - [docs/jev-apis.md](docs/jev-apis.md): the OpenRouter chat SDK and the decisions endpoint, including models, payload shape, question types, and config.
 - [docs/development.md](docs/development.md): uv with the `jev/` venv (`UV_PROJECT_ENVIRONMENT=jev`), commands, single-test runs and config layout.
+- [docs/article.md](docs/article.md): draft article (System One Jev for moves, LLM for plans) with charts in `docs/images/` from `scripts/article_figures.py`.
 - [docs/notebook.md](docs/notebook.md): what `test.ipynb` contains and why its cells depend on execution order.
 
 This file is the overview only. Put new detailed documentation in a `docs/*.md` file and link it here.
