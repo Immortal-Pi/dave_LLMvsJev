@@ -58,11 +58,16 @@ FLY_LOOKAHEAD = 3  # flying: aim at the cell this many cells along the flight pa
 # monster burns and stays dead (game.c: the level start after a death resets only Dave), Dave
 # loses a life and restarts at the level start with what he has collected.
 SACRIFICE_FRAMES = 1200
-# Jetpack fuel kept for the goals that may need a flight to finish the level (the trophy, the
-# door): other goals fly only on what is above it. Level 4: the scripted run spent fuel on loot
-# and short hops; the person used 681 of 900 for the trophy at (5,2) and the door.
-FUEL_RESERVE = 400
-REQUIRED_GOALS = ("collect:trophy", "reach:door")
+# Jetpack fuel is kept for the goals that finish the level (the trophy, the door) and for the gun,
+# and they fly only when no walk or jump reaches them. Level 4: the scripted run spent fuel on loot
+# and short hops; the person used 681 of 900 for the trophy at (5,2) and the door. Level 6 (live,
+# Jev): with fuel above a 400 reserve free for any goal, loot goals kept Dave flying into a wall
+# until 688 of 900 were gone; the gun there is reached only by flight (about 100 fuel), and
+# without it the monster on the floor kills him (route follower: game over by frame 1534).
+FLIGHT_GOALS = ("collect:trophy", "reach:door", "collect:gun")
+# A move whose whole simulated path stays this close to Dave (px), or that was seen to move him no
+# more than this from the same spot, goes nowhere (a wall or a ceiling): it is masked.
+NO_MOVE_PX = 4
 FULL_FUEL = 900  # one jetpack pickup (docs/state_mapping.md): what a flight-only goal needs is assumed
 # The rule priority chooses unless one of these triggers fired (planning.llm_calls: escalate).
 ESCALATE_TRIGGERS = frozenset({"stuck", "repeated_failures", "death"})
@@ -296,7 +301,12 @@ class GoalManager:
         self._goal_start = 0
         self._cells: dict[tuple[int, int], str] = {}  # observed tiles this level (reach, map)
         self._cells_level: str | None = None
-        self._fuel = 0  # jetpack fuel (ticks): routes may fly while there is some
+        self._fuel = 0  # jetpack fuel (ticks): routes to the trophy or door may fly while there is some
+        self._jetpacking = False
+        self._at: Cell | None = None  # Dave's standing cell now, else the last one
+        self._ground_paths: dict[tuple[str, Cell, int], bool] = {}  # (goal, cell, cells known) -> walkable
+        # (x, y, skill) seen to move Dave NO_MOVE_PX or less this level: masked from there again.
+        self._no_moves: set[tuple[int, int, str]] = set()
         self._stalled_since: int | None = None  # first frame with no route note on any option
         # Forecast misses: what the threat screen predicted for the options of the last decision,
         # and (tile, skill) -> causes of deaths that came although the chosen move was predicted safe.
@@ -340,6 +350,7 @@ class GoalManager:
         """After each executed skill: end the goal if due, collect triggers, maybe plan."""
         step = PlanningStep()
         self._learn(obs)
+        self._note_no_move(obs, memory, run)
         launched, heading = self._stand, self._heading
         if any(e.event_type == "death" for e in events):
             self._record_death(obs, run, launched, heading)
@@ -430,6 +441,12 @@ class GoalManager:
             candidates = tuple(c.model_copy(update={"path": self.platforms.path_note(
                 (c.target.col, c.target.row), DIRECTIONS.get(c.target_name, 0) if c.goal_type == "explore" else 0)})
                 for c in candidates)
+            # Only the trophy, the door and the gun may fly, and only where walks and jumps do not reach.
+            flying = self._platforms(obs, candidates, fuel=self._fuel) if self._fuel else None
+            if flying is not None:
+                candidates = tuple(c.model_copy(update={"path": flying.path_note((c.target.col, c.target.row))})
+                                   if c.candidate_id.startswith(FLIGHT_GOALS) and _no_path(c) else c
+                                   for c in candidates)
             # Loot is score only: with no known path it is noise for both planners.
             candidates = tuple(c for c in candidates
                                if not (c.target_kind == "collectible" and _no_path(c))) or candidates
@@ -567,6 +584,7 @@ class GoalManager:
         if obs.level_id != self._cells_level:
             self._cells, self._cells_level = {}, obs.level_id
             self._misses, self._predicted, self._predicted_at = {}, {}, None
+            self._ground_paths, self._no_moves = {}, set()
             self.log.reset(obs.level_id)
             self._stand = self._heading = None
         region = obs.region
@@ -576,7 +594,13 @@ class GoalManager:
         for t in obs.tiles:
             self._cells[(t.pos.col, t.pos.row)] = t.kind
         self._risky = firing_cells(obs) if self.threats is not None else set()
+        self._sense(obs)
+
+    def _sense(self, obs: Observation) -> None:
+        """Fuel, jetpack state and standing cell now: what the fuel policy needs."""
         self._fuel = (obs.inventory or {}).get("jetpack_fuel", 0)
+        self._jetpacking = obs.player_state == "jetpacking"
+        self._at = self._located(obs) or self._stand
 
     def _reach_waypoint(self, obs: Observation, goal: Goal) -> TilePos | None:
         """The next landing spot on the estimated route to the goal's target; the target itself
@@ -587,7 +611,7 @@ class GoalManager:
         if self._tracker is not None and self._tracker.route.status == "found":
             return None  # graph arms follow their learned route
         final = _goal_tile(goal)
-        reach = self._reach_map()
+        reach = self._reach_map(goal)
         assert reach is not None
         here = reach.locate(obs.player_position.x, obs.player_position.y)
         cell = None if here is None else next_waypoint(reach, here, (final.col, final.row))
@@ -611,8 +635,8 @@ class GoalManager:
         self._hits = frozenset()
         if self.reach is None or obs.player_position is None:
             return candidates, {}
-        self._fuel = (obs.inventory or {}).get("jetpack_fuel", 0)
-        reach = ReachMap(self._cells, self.reach, fuel=self._flight_fuel())
+        self._sense(obs)
+        reach = ReachMap(self._cells, self.reach, fuel=self._flight_fuel(self.goal))
         here = (reach.locate(obs.player_position.x, obs.player_position.y)
                 if obs.player_state in STANDING_STATES else None)
         specs = {s.name: s for s in skills}
@@ -622,7 +646,7 @@ class GoalManager:
         # Skills the threat screen will remove are never marked: the next safe way is.
         safe = [c for c in candidates if not _blocks(contacts.get(c.candidate_id))]
         grab = self._grab_notes(obs, reach, safe, specs)
-        if here is None and not contacts and not grab:
+        if here is None and not contacts and not grab and obs.player_state != "jetpacking":
             return candidates, {}  # mid-jump, or not on a known cell: nothing to estimate
         ends = {c.candidate_id: estimate_end_at(reach, obs.player_position.x, obs.player_position.y, specs[c.skill])
                 for c in candidates} if here is not None else {}
@@ -637,15 +661,14 @@ class GoalManager:
             route, timing = self._wait_notes(obs, reach, here, candidates, safe, contacts, specs, ends, timing)
         route = {**route, **kill}
         sacrifice = self._sacrifice_notes(obs, here, route, candidates, contacts) if self.threats is not None else {}
-        route = {**route, **sacrifice}
+        route = {**route, **sacrifice, **self._land_notes(obs, reach, safe, specs, route)}
+        blocked = self._blocked(obs, reach, candidates, specs, route)
         if here is not None:
             self.scores = self._move_scores(obs, candidates, ends)
         out = []
         for c in candidates:
             notes = []
             if here is not None:
-                if self._fuel and specs[c.skill].buttons == {"jetpack"} and c.candidate_id not in route:
-                    notes.append(f"uses fuel ({self._fuel} left): not needed for the planned route")
                 if c.candidate_id in self.scores:
                     notes.append(self.scores[c.candidate_id].note())
                 end = ends[c.candidate_id]
@@ -677,9 +700,80 @@ class GoalManager:
                 elif contact.blocks:
                     text = f"{contact.note()}; {text}"
             out.append(c.model_copy(update={"description": text[:DESCRIPTION_MAX]}))
-        if self.threats is None or not self.threats.mask:
-            return out, {}
-        return screen(out, {cid: None if cid in sacrifice else c for cid, c in contacts.items()})
+        masked: dict[str, str] = {}
+        if self.threats is not None and self.threats.mask:
+            out, masked = screen(out, {cid: None if cid in sacrifice else c for cid, c in contacts.items()})
+        # Moves that go nowhere, and the jetpack off the route: masked unless nothing would be left.
+        keep = [c for c in out if c.candidate_id not in blocked]
+        if keep:
+            masked.update({c.candidate_id: blocked[c.candidate_id] for c in out if c.candidate_id in blocked})
+            out = keep
+        return out, masked
+
+    def _blocked(self, obs: Observation, reach: ReachMap, candidates: list[SkillCandidate],
+                 specs: dict[str, SkillSpec], route: dict[str, str]) -> dict[str, str]:
+        """{id: reason} for the options to mask: turning the jetpack on when no ``route:`` note
+        asks for it (fuel is kept for ``FLIGHT_GOALS``), and moves that go nowhere: their
+        whole simulated path stays within ``NO_MOVE_PX`` of Dave (a wall or a ceiling; unseen
+        cells count as open), or the same skill from the same pixel did not move him before."""
+        pos = obs.player_position
+        if pos is None:
+            return {}
+        opened = reach.opened()
+        out = {}
+        for c in candidates:
+            spec = specs[c.skill]
+            if spec.buttons == {"jetpack"}:
+                if "not_jetpacking" in spec.preconditions and c.candidate_id not in route:
+                    out[c.candidate_id] = "jetpack: not needed for the planned route (saves fuel)"
+                continue
+            if "fire" in spec.buttons or not spec.buttons & {"left", "right", "jump", "down"}:
+                continue  # waits and shots stay
+            if (pos.x, pos.y, c.skill) in self._no_moves:
+                out[c.candidate_id] = f"blocked: moved {NO_MOVE_PX} px or less from here before"
+                continue
+            if obs.player_state == "jetpacking":
+                path = trace_flying(opened, pos.x, pos.y, spec, self._fuel)
+            elif obs.player_state in STANDING_STATES:
+                path = trace_skill(opened, pos.x, pos.y, spec, 0, obs.jump_cooldown)
+            else:
+                continue  # mid-jump or falling: the arc moves him anyway
+            if _still(path, pos.x, pos.y):
+                out[c.candidate_id] = "blocked: no movement (wall or ceiling)"
+        return out
+
+    def _note_no_move(self, obs: Observation, memory: WorkingMemory, run: ExecutionResult | None) -> None:
+        """Remember a skill that completed without moving Dave more than ``NO_MOVE_PX`` from where
+        it started at any frame: from that pixel it is masked for the rest of the level."""
+        entry = memory.history[-1] if memory.history else None
+        if run is None or run.outcome != "completed" or not run.steps or entry is None \
+                or entry.skill != run.skill or entry.start_position is None or obs.level_id != self.level_id:
+            return
+        start = (entry.start_position.x, entry.start_position.y)
+        path = [(s.observation.player_position.x, s.observation.player_position.y)
+                for s in run.steps if s.observation.player_position is not None]
+        if path and _still(path, *start):
+            self._no_moves.add((*start, run.skill))
+
+    def _land_notes(self, obs: Observation, reach: ReachMap, candidates: list[SkillCandidate],
+                    specs: dict[str, SkillSpec], route: dict[str, str]) -> dict[str, str]:
+        """While Dave flies toward a goal that may not fly (anything but ``FLIGHT_GOALS``,
+        or one that walks and jumps reach): ``route:`` on turning the jetpack off, when the fall
+        touches no hazard; else on the flying moves toward the nearest cell to stand on (level 6:
+        with fire below, the route follower hovered until the fuel ran out). Hovering burns fuel."""
+        pos = obs.player_position
+        if pos is None or obs.player_state != "jetpacking" or reach.fuel or any(
+                route.get(c.candidate_id, "").startswith("route: flies") for c in candidates):
+            return {}
+        land = {c.candidate_id: "route: lands — the goal needs no flight; saves fuel"
+                for c in candidates if specs[c.skill].buttons == {"jetpack"}
+                and not reach.burns(trace_flying(reach, pos.x, pos.y, specs[c.skill], self._fuel))}
+        if land or self.reach is None:
+            return land
+        flying = ReachMap(self._cells, self.reach, fuel=self._fuel)
+        start = ((pos.x + TILE // 2) // TILE, (pos.y + TILE // 2) // TILE)
+        stands = {c for c in flying.fly_cells(start)[0] if flying.standable(c)}
+        return self._fly_toward(obs, flying, candidates, specs, stands, "flies to land (the goal needs no flight) on")
 
     def _kill_notes(self, obs: Observation, reach: ReachMap, candidates: list[SkillCandidate],
                     contacts: dict[str, Contact | None], specs: dict[str, SkillSpec]) -> dict[str, str]:
@@ -776,9 +870,17 @@ class GoalManager:
         if pos is None or goal is None or obs.player_state != "jetpacking" or not self._fuel:
             return {}
         wp = goal.next_waypoint or _goal_tile(goal)
+        return self._fly_toward(obs, reach, candidates, specs, reach.targets_for((wp.col, wp.row)), "flies toward")
+
+    def _fly_toward(self, obs: Observation, reach: ReachMap, candidates: list[SkillCandidate],
+                    specs: dict[str, SkillSpec], targets: set[Cell], verb: str) -> dict[str, str]:
+        """``route:`` notes on the flying moves that get Dave furthest along the shortest flight
+        to the nearest of ``targets``, and on turning the jetpack off where that lands him on it."""
+        pos = obs.player_position
+        assert pos is not None
         start = ((pos.x + TILE // 2) // TILE, (pos.y + TILE // 2) // TILE)
         dist, _ = reach.fly_cells(start)
-        ends = [t for t in reach.targets_for((wp.col, wp.row)) if t in dist]
+        ends = [t for t in targets if t in dist]
         if not ends:
             return {}
         end = min(ends, key=lambda c: (dist[c], c))
@@ -807,7 +909,7 @@ class GoalManager:
                 scored[c.candidate_id] = gap(*flown[-1])
         if scored:
             best = min(scored.values())
-            out.update({cid: f"route: flies toward {target}" for cid, s in scored.items() if s == best})
+            out.update({cid: f"route: {verb} {target}" for cid, s in scored.items() if s == best})
         return out
 
     def _air_notes(self, obs: Observation, reach: ReachMap, candidates: list[SkillCandidate],
@@ -823,6 +925,8 @@ class GoalManager:
         targets = self._goal_targets(reach, self.goal) if self.goal is not None else set()
         lands: dict[str, Cell] = {}
         for c in candidates:
+            if "jetpack" in specs[c.skill].buttons:
+                continue  # not a landing: it starts a flight (fuel is for the route's flights only)
             path = trace_in_jump(opened, pos.x, pos.y, obs.jump_tick, specs[c.skill])
             cell = reach.locate(*path[-1])
             if cell is not None and not reach.burns(path):
@@ -1105,18 +1209,29 @@ class GoalManager:
         return text
 
     # -- attempts and failed moves (control/attempts.py) -------------------------------------
-    def _reach_map(self) -> ReachMap | None:
-        """The reach estimate over this level's cells; moves that failed here cost more."""
+    def _reach_map(self, goal: Goal | None = None) -> ReachMap | None:
+        """The reach estimate over this level's cells for ``goal`` (default: the active goal);
+        moves that failed here cost more."""
         if self.reach is None:
             return None
         missed = {cell for cell, _ in self._misses}
-        return ReachMap(self._cells, self.reach, self.log.failures(), self._risky | missed, fuel=self._flight_fuel())
+        return ReachMap(self._cells, self.reach, self.log.failures(), self._risky | missed,
+                        fuel=self._flight_fuel(goal or self.goal))
 
-    def _flight_fuel(self) -> int:
-        """The fuel routes may fly on: all of it for the trophy and the door, what is above
-        ``FUEL_RESERVE`` for anything else."""
-        ref = self.goal.target_ref if self.goal is not None else ""
-        return self._fuel if ref.startswith(REQUIRED_GOALS) else max(0, self._fuel - FUEL_RESERVE)
+    def _flight_fuel(self, goal: Goal | None) -> int:
+        """The fuel routes for ``goal`` may fly on: all of it for the trophy, the door and the gun when no
+        walk or jump reaches them from where Dave last stood (or while he is already flying
+        there), none for anything else."""
+        if not self._fuel or goal is None or not goal.target_ref.startswith(FLIGHT_GOALS):
+            return 0
+        if self._jetpacking or self._at is None or self.reach is None:
+            return self._fuel
+        final = _goal_tile(goal)
+        key = (goal.target_ref, self._at, len(self._cells))
+        if key not in self._ground_paths:
+            ground = ReachMap(self._cells, self.reach)
+            self._ground_paths[key] = ground.path(self._at, ground.targets_for((final.col, final.row))) is not None
+        return 0 if self._ground_paths[key] else self._fuel
 
     def _located(self, obs: Observation) -> Cell | None:
         """Dave's standing cell on the estimate's map; None without a reach envelope or airborne."""
@@ -1226,8 +1341,9 @@ class GoalManager:
 
     def _requires(self, obs: Observation,
                   candidates: tuple[GoalCandidate, ...]) -> tuple[GoalCandidate, ...]:
-        """Mark the item goals that only a flight reaches while Dave has no fuel: ``requires``
-        the jetpack, and the path says so (with where the jetpack is, when known)."""
+        """Mark the trophy, door and gun goals that only a flight reaches while Dave has no fuel:
+        ``requires`` the jetpack, and the path says so (with where the jetpack is, when known).
+        Other goals never fly, so they never require it."""
         here = self._located(obs)
         if self._fuel or here is None or self.reach is None:
             return candidates
@@ -1235,17 +1351,21 @@ class GoalManager:
         flying = ReachMap(self._cells, self.reach, self.log.failures(), self._risky, fuel=FULL_FUEL)
         out = []
         for c in candidates:
-            if c.goal_type in ("collect", "reach") and c is not jetpack and _no_path(c) and                     flying.path(here, flying.targets_for((c.target.col, c.target.row))) is not None:
+            if c.candidate_id.startswith(FLIGHT_GOALS) and _no_path(c) and \
+                    flying.path(here, flying.targets_for((c.target.col, c.target.row))) is not None:
                 where = f"; jetpack at ({jetpack.target.col},{jetpack.target.row})" if jetpack else ""
                 c = c.model_copy(update={"requires": ("jetpack",),
                                          "path": f"{c.path}; reachable with the jetpack (not held{where})"})
             out.append(c)
         return tuple(out)
 
-    def _platforms(self, obs: Observation, candidates: tuple[GoalCandidate, ...]) -> Platforms | None:
-        reach = self._reach_map()
-        if reach is None:
+    def _platforms(self, obs: Observation, candidates: tuple[GoalCandidate, ...], fuel: int = 0) -> Platforms | None:
+        """The explored platforms as the planner sees them: by walks and jumps, with ``fuel`` also
+        by flight (only ``FLIGHT_GOALS`` paths are read from a flying one)."""
+        if self.reach is None:
             return None
+        missed = {cell for cell, _ in self._misses}
+        reach = ReachMap(self._cells, self.reach, self.log.failures(), self._risky | missed, fuel=fuel)
         out = Platforms(reach, self._located(obs))
         out.note_items({c.candidate_id: (c.target.col, c.target.row) for c in candidates
                         if c.goal_type != "explore"})
@@ -1381,7 +1501,7 @@ class GoalManager:
             triggers=triggers,
             player={"tile": [here.col, here.row] if here else None, "state": obs.player_state,
                     "grounded": obs.grounded, "facing": obs.facing,
-                    "fuel": {"left": self._fuel, "reserve": FUEL_RESERVE}},
+                    "fuel": {"left": self._fuel, "flies_for": "trophy, door and gun only"}},
             lives=obs.lives, inventory=obs.inventory, score=obs.score,
             view_cols=(obs.region.min.col, obs.region.max.col), nearby=tuple(nearby[:MAX_NEARBY]),
             recent=recent, previous_goal=self.previous,
@@ -1396,6 +1516,11 @@ class GoalManager:
 
 def _no_path(candidate: GoalCandidate) -> bool:
     return bool(candidate.path and candidate.path.startswith("no known path"))
+
+
+def _still(path: list[tuple[int, int]], x: int, y: int) -> bool:
+    """Whether every point of ``path`` is within ``NO_MOVE_PX`` of (x, y)."""
+    return all(abs(px - x) <= NO_MOVE_PX and abs(py - y) <= NO_MOVE_PX for px, py in path)
 
 
 def _blocks(contact: Contact | None) -> bool:
