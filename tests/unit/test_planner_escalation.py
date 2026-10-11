@@ -6,7 +6,7 @@ import json
 
 import httpx
 
-from dave_agent.control.goals import FUEL_RESERVE, GoalManager
+from dave_agent.control.goals import GoalManager
 from dave_agent.models import azure, tactical
 from dave_agent.models.azure import AzurePlanner
 from dave_agent.models.planner import GoalCandidate, ScriptedPlanner, rule_choice
@@ -110,8 +110,8 @@ def test_with_fuel_nothing_is_required(config):
 def test_unreachable_loot_is_not_offered(config):
     gm, planner, step = started_walled(config, walled(WALLED_GEM))
     assert not any(c.target_kind == "collectible" for c in planner.requests[0].candidates)
-    gm, planner, step = started_walled(config, walled(WALLED_GEM, fuel=900))  # flying gets there
-    assert any(c.target_kind == "collectible" for c in planner.requests[0].candidates)
+    gm, planner, step = started_walled(config, walled(WALLED_GEM, fuel=900))  # loot never flies
+    assert not any(c.target_kind == "collectible" for c in planner.requests[0].candidates)
 
 
 def test_rule_choice_takes_the_required_item_first():
@@ -127,22 +127,63 @@ def test_rule_choice_takes_the_required_item_first():
 
 
 # -- fuel ----------------------------------------------------------------------------------------
-def test_planner_request_carries_the_fuel_and_its_reserve(config):
+def test_planner_request_carries_the_fuel(config):
     gm, planner, step = started_walled(config, walled(fuel=650))
-    assert planner.requests[0].player["fuel"] == {"left": 650, "reserve": FUEL_RESERVE}
+    assert planner.requests[0].player["fuel"] == {"left": 650, "flies_for": "trophy, door and gun only"}
 
 
-def test_jetpack_on_off_the_route_says_it_uses_fuel(config):
+def test_jetpack_on_is_masked_off_the_route(config):
     first = walled(fuel=900)
     gm, planner, step = started_walled(config, first, [choose("collect:jetpack:c2:r4")])
     candidates, catalog = offered(first)
-    notes = {c.skill: c.description for c in gm.annotate(first, candidates, catalog)[0]}
-    assert "uses fuel (900 left): not needed for the planned route" in notes["jetpack_on"]
-    assert "uses fuel" not in notes["move_right_1"]
+    kept, masked = gm.annotate(first, candidates, catalog)
+    masked = {cid.split("_", 1)[1]: why for cid, why in masked.items()}
+    assert masked["jetpack_on"] == "jetpack: not needed for the planned route (saves fuel)"
+    assert "move_right_1" in {c.skill for c in kept}
     # Toward the trophy behind the wall the route flies: jetpack_on carries the route note instead.
     gm, planner, step = started_walled(config, first, [choose("collect:trophy:c5:r4")])
-    notes = {c.skill: c.description for c in gm.annotate(first, candidates, catalog)[0]}
-    assert notes["jetpack_on"].startswith("route: turns the jetpack on") and "uses fuel" not in notes["jetpack_on"]
+    kept, masked = gm.annotate(first, candidates, catalog)
+    notes = {c.skill: c.description for c in kept}
+    assert notes["jetpack_on"].startswith("route: turns the jetpack on") and "c15_jetpack_on" not in masked
+
+
+def test_a_trophy_that_walks_and_jumps_reach_does_not_fly(config):
+    # The wall opened at the bottom: Dave walks to the trophy, so its route keeps the fuel.
+    first = walled(WALLED[:4] + ("#.J..T#", "#######"), fuel=900)
+    gm, planner, step = started_walled(config, first, [choose("collect:trophy:c5:r4")])
+    trophy = next(c for c in planner.requests[0].candidates if c.target_name == "trophy")
+    assert "fly" not in trophy.path
+    assert gm._flight_fuel(gm.goal) == 0
+    candidates, catalog = offered(first)
+    kept, masked = gm.annotate(first, candidates, catalog)
+    assert masked["c15_jetpack_on"] == "jetpack: not needed for the planned route (saves fuel)"
+
+
+def test_the_gun_may_fly_and_loot_may_not(config):
+    # Level 6: the gun is reached only by flight, and without it the floor's monster kills Dave.
+    gm, planner, step = started_walled(config, walled(WALLED[:4] + ("#.J.#G#", "#######"), fuel=900))
+    gun = next(c for c in planner.requests[0].candidates if c.target_name == "gun")
+    assert not gun.path.startswith("no known path")
+    gm, planner, step = started_walled(config, walled(WALLED_GEM, fuel=900))
+    assert not any(c.target_kind == "collectible" for c in planner.requests[0].candidates)
+
+
+def test_a_flight_only_trophy_flies(config):
+    gm, planner, step = started_walled(config, walled(fuel=900))
+    trophy = next(c for c in planner.requests[0].candidates if c.target_name == "trophy")
+    assert not trophy.path.startswith("no known path")  # the flight over the wall
+    assert gm.goal.target_ref == "collect:trophy:c5:r4" and gm._flight_fuel(gm.goal) == 900
+
+
+def test_flying_toward_a_goal_that_needs_no_flight_lands(config):
+    gm, planner, step = started_walled(config, walled(WALLED_GEM, fuel=900))
+    assert gm.goal.target_ref == "collect:jetpack:c2:r4"
+    flying = obs(grid=WALLED_GEM, cols=(0, 6), player=(2, 2), grounded=False, state="jetpacking",
+                 inventory={"trophy": 0, "jetpack_fuel": 800})
+    candidates, catalog = offered(flying)
+    kept, masked = gm.annotate(flying, candidates, catalog)
+    notes = {c.skill: c.description for c in kept}
+    assert notes["jetpack_off"].startswith("route: lands — the goal needs no flight; saves fuel")
 
 
 def test_prompts_carry_the_fuel_guidance():
@@ -186,3 +227,18 @@ def test_stuck_triggers_raise_the_reasoning_effort(config):
 def test_waypoints_are_platform_ids_only(config):
     schema = body_for({}, request(config))["response_format"]["json_schema"]["schema"]
     assert schema["properties"]["waypoints"]["items"] == {"type": "string"}
+
+
+def test_flying_over_fire_lands_where_dave_can_stand(config):
+    # Fire under Dave: dropping would burn him, so the route flies to the one safe cell, (5,4).
+    pit = ("#######", "#.....#", "#.....#", "#.....#", "#FFFF.#", "#######")
+    first = obs(grid=pit, cols=(0, 6), player=(5, 4), inventory={"trophy": 0, "jetpack_fuel": 900})
+    gm, planner, step = started_walled(config, first)
+    assert not gm.goal.target_ref.startswith(("collect:trophy", "reach:door", "collect:gun"))
+    flying = obs(grid=pit, cols=(0, 6), player=(2, 2), grounded=False, state="jetpacking",
+                 inventory={"trophy": 0, "jetpack_fuel": 800})
+    candidates, catalog = offered(flying)
+    kept, masked = gm.annotate(flying, candidates, catalog)
+    notes = {c.skill: c.description for c in kept}
+    assert not notes["jetpack_off"].startswith("route:")
+    assert any(n.startswith("route: flies to land (the goal needs no flight) on [5, 4]") for n in notes.values())

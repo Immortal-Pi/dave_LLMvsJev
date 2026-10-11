@@ -507,6 +507,34 @@ Live runs showed the Azure planner choosing loot almost a whole level-4 run, sen
 
 Checks: 375 tests pass. `follow_route.py` (rule planner, route follower): levels 1 and 2 give the same results as before (level 1 in 478 frames, level 2 in 3805, no deaths); the level 3 and 4 runs after the change were stopped before they finished. Before the change the follower completed level 3 (3 deaths) re-picking `collect:loot:c19:r4` about 27 times, and on level 4 it set the flight-only trophy 10 times, took the jetpack late and did not finish in 18,000 frames. Not run: a live planner run with the new prompt.
 
+## Walls and fuel (2026-10-10)
+
+Two live level 6 runs (arm C, Jev, rule planner; `live-20261010T180853-ebc56b`, `…181601-56af0e` in `artifacts/live.sqlite`) showed the following problems:
+- **Fuel spent on the wrong goals.** Dave took the jetpack at frame 106, and the gun's route flew on the fuel above the 400 reserve. The rule planner then set loot goals while he was still flying (their path read "unknown: Dave is not standing", so the loot filter kept them). From frame 379 to 795 he pressed `fly_up_*`/`fly_right_*` against a wall at (68,78) without moving: fuel went from 900 to 212.
+- **Walking into walls.** While flying, no option carried an estimate, so Jev chose blind. On the ground, `jump_right` from (111,144) moved 4 px three times in a row, and walks at x 612 moved 0 px.
+
+Changes (`docs/planner.md` "Flying" and "Saving fuel", `docs/skills.md` "Moves that go nowhere"):
+- **Fuel policy:** only the trophy, the door and the gun (`FLIGHT_GOALS`) may fly, on all the fuel, and only when no walk or jump reaches them (`_flight_fuel`). Loot and explore never fly. `FUEL_RESERVE` is gone, and the planner sees `player.fuel.flies_for`. Candidate paths follow the same rule, so flight-only loot is left out.
+- **The gun** was added on request after a check: under "trophy and door only", the route follower on level 6 could not take the gun (it is reachable only by flight) and lost all 4 lives to the bones monster by frame 1534.
+- **`jetpack_on` without a `route:` note is masked.** The mid-jump landing notes skip the jetpack toggles: the follower had turned the jetpack on mid-jump because a landing note called it the best landing.
+- **Landing:** while Dave flies on a goal that may not fly, `jetpack_off` gets `route: lands — …`. When dropping would burn him, the flying moves toward the nearest cell he can stand on get `route: flies to land … on [x, y]`. Before this, the follower hovered over fire on level 6 until the fuel ran out.
+- **Moves that go nowhere are masked:** a simulated path that stays within 4 px of Dave (standing, or jetpacking), or the same skill seen not to move him from the same pixel this level.
+
+Checks:
+- `uv run pytest`: 384 passed, 1 skipped (new: `test_noop_moves.py` (4) and fuel tests in `test_planner_escalation.py`).
+- `follow_route.py`, levels 1 and 2: unchanged (level 1 in 478 frames, level 2 in 3805, no deaths).
+
+| Level 6 (8000 frames) | Before | After |
+| --- | --- | --- |
+| Deaths | 1 | 0 |
+| Gun | taken | taken |
+| Score | 950 | 1150 |
+| Fuel left | 0 (spent on loot) | 561 (gun about 100, trophy flight about 240) |
+
+Level 3 (18,000 frames) gives exactly the same result before and after: 2408 decisions, 2 deaths, the gun, no jetpack or trophy. In both, Dave waits at (45,6) on `explore:right` for about 1,300 decisions with no route note on any option. This stall predates this change (the last completed level 3 run was before 2026-10-08) and is still open.
+
+**Replay note:** the request text and masks changed, so older runs no longer match their digests in `inspect`.
+
 ## Verification (run 2026-10-03)
 
 ```bash
@@ -666,6 +694,8 @@ Live evidence covers **arms A, B and C** (labeled `mode=live`): one smoke episod
 - **A web viewer after all (user decision, 2026-10-03).** The spec says "do not build a web application" for V1 (`implementation/01-project-overview.md`). On request, `frontend/` is a local, read-only Next.js viewer of inspection bundles: no deploy, no model calls, no writes, and no game assets in `public/`.
 - **The inspector rebuilds rather than logs request text.** The store already holds a digest per request. A replay checked against those digests gives the exact text without growing every episode store, and proves the replay is exact.
 - **Level 2 is completable with the catalog alone too** (`scripts/search_route.py`, 37 skills, 1928 frames). So level-2 failures are decision and memory problems as well, not missing skills.
+- **Moves that cannot move Dave are masked (2026-10-10, user decision).** This is a legal-action mask, not experience: a walk into a wall or a flight into a ceiling (simulated, or seen from the same pixel) carries no information, and Jev kept choosing them. When every option would be masked, none is.
+- **Fuel is for the trophy, the door and the gun (2026-10-10, user decision),** and only when walks and jumps do not reach them.
 - **Experience reaches the models as candidate notes, never as masks.** Masking a move that killed Dave would be a hand-written policy doing the model's job. Notes give every arm the same facts, and graph arms add their past-run evidence, which keeps memory the variable between B and C.
 - **Level 1 is completable with the catalog alone** (`scripts/try_skills.py`, 10 skills, 554 frames; see `docs/skills.md`). Failures to finish are decision and information problems, not missing skills.
 - **Reachability waypoints and estimated end tiles** (every arm, Dave only). With the waypoint alone, Jev still jumped into the ceiling at (7,9) 310 times. With the estimated end tile on each candidate, live Jev finished level 1: 11 decisions, 470 frames, $0.001 (run `diag-jev-3`). Without either, it never left the floor in 400 decisions (`diag-jev-1`). The models now mostly choose among estimated outcomes; Phase 9 should report this as the setup, and an ablation without estimates is worth keeping.

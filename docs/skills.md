@@ -119,6 +119,15 @@ A predicate whose field is unavailable returns False, so the skill is masked rat
   - the end position matched within 2 px for 88% of skills.
   - Long mock runs on levels 2 and 3 (18,000 frames each) went from 4 and 2 deaths to none.
 
+## Moves that go nowhere (added 2026-10-10)
+
+In a live level 6 run (Jev), Dave pressed `fly_up_*` and `fly_right_*` against a wall at (68,78) for 400 frames without moving, and on the ground `jump_right` from (111,144) moved 4 px three times in a row. While flying, no option carried an estimate, so the model chose blind. `GoalManager._blocked` now masks, after the threat screen:
+- **Simulated no-ops:** a skill that presses a direction or jump key whose whole simulated path stays within `NO_MOVE_PX` (4 px) of Dave: `trace_skill` when standing (with the jump cooldown), `trace_flying` while jetpacking. Unseen cells count as open (`ReachMap.opened`), so a move toward the screen edge is never masked for a wall nobody has seen. Reason: `blocked: no movement (wall or ceiling)`. `jump_up` under open sky rises 32 px and is kept; waits and shots are never masked.
+- **Observed no-ops:** a skill that completed without Dave ever leaving a 4 px box around its start (every frame of the run) is remembered as (x, y, skill) for the level (`GoalManager._note_no_move`), and masked from that exact pixel: `blocked: moved 4 px or less from here before`. This catches what the simulation misses.
+- **`jetpack_on` off the route:** see `docs/planner.md` "Saving fuel".
+
+If every option would be masked, none is. The masks join the threat screen's in the `candidates_screened` event and the live viewer. This is a legal-action mask, not experience: a move that cannot move Dave carries no information for the model.
+
 ## Dave catalog
 
 | Skill | Kind | Preconditions | Phases (buttons → length) | Max frames |
