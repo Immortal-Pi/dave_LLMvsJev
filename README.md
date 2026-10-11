@@ -1,5 +1,9 @@
 # System One Model: Jev and an LLM Playing Dangerous Dave
 
+[![Watch the demo on YouTube](https://img.youtube.com/vi/BTC-Yh-b1bk/maxresdefault.jpg)](https://youtu.be/BTC-Yh-b1bk)
+
+*Click the image to watch the demo on YouTube.*
+
 A Python research harness that plays *Dangerous Dave* (1990) through the open-source
 [deadly-dave](https://github.com/skoperst/deadly-dave) reimplementation, reading the game's real
 state every tick. It compares two kinds of controller:
